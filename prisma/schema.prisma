@@ -1,0 +1,73 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Admin {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  password  String
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Committee {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  color     String   @default("#1e3a5f")
+  points    Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  members   MemberCommittee[]
+}
+
+model Member {
+  id         String   @id @default(cuid())
+  name       String
+  email      String   @unique
+  type       String   @default("activo") // "activo" o "nuevo"
+  points     Int      @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  committees MemberCommittee[]
+  attendances EventAttendance[]
+}
+
+model MemberCommittee {
+  id          String    @id @default(cuid())
+  member      Member    @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  memberId    String
+  committee   Committee @relation(fields: [committeeId], references: [id], onDelete: Cascade)
+  committeeId String
+  createdAt   DateTime  @default(now())
+
+  @@unique([memberId, committeeId])
+}
+
+model Event {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  points      Int
+  date        DateTime
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  attendances EventAttendance[]
+}
+
+model EventAttendance {
+  id        String   @id @default(cuid())
+  event     Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  eventId   String
+  member    Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  memberId  String
+  points    Int
+  createdAt DateTime @default(now())
+
+  @@unique([eventId, memberId])
+}
