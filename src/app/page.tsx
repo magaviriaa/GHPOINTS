@@ -35,6 +35,8 @@ export default function Home() {
   const [committees, setCommittees] = useState<Committee[]>([]);
   const [events, setEvents] = useState<Event[]>([]);
   const [loading, setLoading] = useState(true);
+  const [memberSearch, setMemberSearch] = useState("");
+  const [committeeSearch, setCommitteeSearch] = useState("");
 
   useEffect(() => {
     fetchData();
@@ -52,18 +54,18 @@ export default function Home() {
       const committeesData = await committeesRes.json();
       const eventsData = await eventsRes.json();
 
-      setActiveMembers(
-        membersData
-          .filter((m: Member) => m.type === "activo")
-          .sort((a: Member, b: Member) => b.points - a.points)
-          .slice(0, 10)
-      );
-      setNewMembers(
-        membersData
-          .filter((m: Member) => m.type === "nuevo")
-          .sort((a: Member, b: Member) => b.points - a.points)
-          .slice(0, 10)
-      );
+setActiveMembers(
+  membersData
+    .filter((m: Member) => m.type === "activo")
+    .sort((a: Member, b: Member) => b.points - a.points)
+);
+
+setNewMembers(
+  membersData
+    .filter((m: Member) => m.type === "nuevo")
+    .sort((a: Member, b: Member) => b.points - a.points)
+);
+
       setCommittees(
         committeesData.sort((a: Committee, b: Committee) => b.points - a.points)
       );
@@ -81,6 +83,26 @@ export default function Home() {
     if (index === 2) return "bg-amber-600";
     return "bg-slate-600";
   };
+
+const filteredActiveMembers = activeMembers.filter((m: Member) => {
+  const q = memberSearch.toLowerCase();
+  return (
+    m.name.toLowerCase().includes(q) ||
+    m.email.toLowerCase().includes(q)
+  );
+});
+
+const filteredNewMembers = newMembers.filter((m: Member) => {
+  const q = memberSearch.toLowerCase();
+  return (
+    m.name.toLowerCase().includes(q) ||
+    m.email.toLowerCase().includes(q)
+  );
+});
+
+const filteredCommittees = committees.filter((c: Committee) =>
+  c.name.toLowerCase().includes(committeeSearch.toLowerCase())
+);
 
   const Podium = ({
     title,

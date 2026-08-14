@@ -17,23 +17,25 @@ model Admin {
 }
 
 model Committee {
-  id        String   @id @default(cuid())
-  name      String   @unique
-  color     String   @default("#1e3a5f")
-  points    Int      @default(0)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  members   MemberCommittee[]
+  id         String                @id @default(cuid())
+  name       String                @unique
+  color      String                @default("#1e3a5f")
+  points     Int                   @default(0)
+  createdAt  DateTime              @default(now())
+  updatedAt  DateTime              @updatedAt
+  members    MemberCommittee[]
+  eventScores CommitteeEventScore[]
+  committeePointLogs CommitteePointLog[]
 }
 
 model Member {
-  id         String   @id @default(cuid())
+  id         String            @id @default(cuid())
   name       String
-  email      String   @unique
-  type       String   @default("activo") // "activo" o "nuevo"
-  points     Int      @default(0)
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  email      String            @unique
+  type       String            @default("activo")
+  points     Int               @default(0)
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
   committees MemberCommittee[]
   attendances EventAttendance[]
 }
@@ -50,14 +52,16 @@ model MemberCommittee {
 }
 
 model Event {
-  id          String   @id @default(cuid())
-  name        String
-  description String?
-  points      Int
-  date        DateTime
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  attendances EventAttendance[]
+  id              String                @id @default(cuid())
+  name            String
+  description     String?
+  points          Int
+  date            DateTime
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+  attendances     EventAttendance[]
+  committeeScores CommitteeEventScore[]
+  committeePointLogs CommitteePointLog[]
 }
 
 model EventAttendance {
@@ -70,4 +74,35 @@ model EventAttendance {
   createdAt DateTime @default(now())
 
   @@unique([eventId, memberId])
+}
+
+model CommitteeEventScore {
+  id                    String    @id @default(cuid())
+  committee             Committee @relation(fields: [committeeId], references: [id], onDelete: Cascade)
+  committeeId           String
+  event                 Event     @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  eventId               String
+  attendeeCount         Int       @default(0)
+  committeeSizeSnapshot Int
+  points                Int       @default(0)
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@unique([committeeId, eventId])
+}
+
+model CommitteePointLog {
+  id            String    @id @default(cuid())
+  event         Event     @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  eventId       String
+  committee     Committee @relation(fields: [committeeId], references: [id], onDelete: Cascade)
+  committeeId   String
+  basePoints    Int
+  committeeSize Int
+  attendeeCount Int
+  awardedPoints Int
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@unique([eventId, committeeId])
 }

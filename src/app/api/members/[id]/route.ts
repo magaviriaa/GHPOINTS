@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/db";
+import { recalculateCommitteePointsForEvent } from "@/lib/committee-points";
 import { NextRequest, NextResponse } from "next/server";
 
 export async function GET(
@@ -88,9 +89,35 @@ export async function DELETE(
 ) {
   try {
     const { id } = await params;
+
+    const member = await prisma.member.findUnique({
+      where: { id },
+      include: {
+        committees: {
+          select: { committeeId: true },
+        },
+        attendances: {
+          select: { eventId: true },
+        },
+      },
+    });
+
+    if (!member) {
+      return NextResponse.json({ error: "Member not found" }, { status: 404 });
+    }
+
+    const affectedCommitteeIds = member.committees.map((c) => c.committeeId);
+    const affectedEventIds = Array.from(
+      new Set(member.attendances.map((a) => a.eventId))
+    );
+
     await prisma.member.delete({
       where: { id },
     });
+
+    for (const eventId of affectedEventIds) {
+      await recalculateCommitteePointsForEvent(eventId, affectedCommitteeIds);
+    }
 
     return NextResponse.json({ success: true });
   } catch (error) {
