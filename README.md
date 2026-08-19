@@ -1,36 +1,72 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# GH Points
 
-## Getting Started
+Plataforma de gamificación, asistencia y GH Points para una Organización Estudiantil. Reemplaza el flujo Microsoft Forms → Excel → puntos manuales.
 
-First, run the development server:
+El MVP funciona **sin** acceso administrativo al tenant de Microsoft 365. La autenticación es correo institucional + OTP.
+
+## Stack
+
+- Next.js (App Router) + TypeScript
+- PostgreSQL + Prisma
+- Tailwind CSS + shadcn/ui
+- Zod, Vitest, Playwright
+
+## Arranque local
 
 ```bash
+cp .env.example .env
+# Ajusta DATABASE_URL: Docker Compose o Postgres local (Homebrew)
+npm install
+npm run db:up          # si usas Docker
+# o inicia Postgres local y crea la base `ghpoints`
+npx prisma migrate dev
+npm run db:seed
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+En desarrollo, `OTP_FIXED_CODE=123456` evita depender de un proveedor de correo. El adapter de email escribe el código y el enlace mágico en consola si no hay `RESEND_API_KEY`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+Login de administración (mismo OTP, rol ADMIN en seed):
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- correo: `gh.general@<dominio de INSTITUTIONAL_EMAIL_DOMAINS>`
+- código: `123456`
 
-## Learn More
+Un integrante de prueba: `integrante.02@<dominio>`.
+Líder de GEMIS: `lider.gemis@<dominio>`.
 
-To learn more about Next.js, take a look at the following resources:
+Entra SSO y Teams son opcionales: si las variables están vacías, la app arranca igual. Health: `GET /api/health` comprueba Postgres.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Variables
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Ver `.env.example`. El dominio institucional **no** va hardcodeado: `INSTITUTIONAL_EMAIL_DOMAINS`.
 
-## Deploy on Vercel
+Nuevas (todas opcionales salvo que se indique):
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+- `MAGIC_LINK_SECRET` — si vacío, usa `SESSION_SECRET`
+- `AUTH_PROVIDERS` — default `email_otp`; añade `entra` para SSO
+- `ENTRA_CLIENT_ID` / `ENTRA_CLIENT_SECRET` / `ENTRA_TENANT_ID` / `ENTRA_ALLOWED_TIDS`
+- `TEAMS_WEBHOOK_URL` — incoming webhook; si vacío, no-op
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+
+## Documentación
+
+La guía completa en español (arquitectura, modelo de datos, dominio, flujos, rutas, tests) está en **[docs/es/README.md](docs/es/README.md)**. Empieza por ahí si vas a tocar el código.
+
+También:
+
+- [Glosario de dominio](CONTEXT.md)
+- [Decisiones (ADR)](docs/decisions.md)
+- [Backlog](docs/backlog.md)
+- [Entra SSO](docs/entra-sso.md)
+- [Teams webhook](docs/teams.md)
+
+## Tests
+
+```bash
+npm test
+npm run test:e2e
+```
+
+## Importación Forms
+
+`POST /api/import/forms` con `Authorization: Bearer $IMPORT_SECRET` o sesión admin.

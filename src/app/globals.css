@@ -3,58 +3,113 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/*
+ * Dirección «Marcador». La paleta sale del mundo del sujeto —competencia entre
+ * comités, podios, temporadas, medallas— no de un dashboard corporativo.
+ * Los metales no son decoración: mapean uno a uno los niveles de GH_POINT_LEVELS.
+ */
 :root {
-  --background: #f8fafc;
-  --foreground: #0f172a;
-  --card: #ffffff;
-  --card-foreground: #0f172a;
-  --popover: #ffffff;
-  --popover-foreground: #0f172a;
-  --primary: #1e3a5f;
-  --primary-foreground: #f8fafc;
-  --secondary: #e2e8f0;
-  --secondary-foreground: #0f172a;
-  --muted: #f1f5f9;
-  --muted-foreground: #64748b;
-  --accent: #d97706;
-  --accent-foreground: #ffffff;
-  --destructive: #ef4444;
-  --destructive-foreground: #f8fafc;
-  --border: #e2e8f0;
-  --input: #e2e8f0;
-  --ring: #1e3a5f;
-  --radius: 0.5rem;
-  
-  /* Custom colors */
-  --night-blue: #1e3a5f;
-  --mustard: #d97706;
-  --orange: #ea580c;
-  --sky-blue: #0ea5e9;
+  color-scheme: light;
+
+  /* Paleta nombrada */
+  --tinta: #0b1220;
+  --papel: #f3f4f7;
+  --cal: #ffffff;
+  --cobalto: #1d3fe0;
+  --oro: #f2b705;
+  --oro-tinta: #8a6200;
+  --exito: #0c7a53;
+  --alerta: #c42a38;
+
+  /* Metales de nivel: Novato → Bronce → Plata → Oro → Élite */
+  --metal-novato: #7c8798;
+  --metal-bronce: #a45b2a;
+  --metal-plata: #8a93a6;
+  --metal-oro: #c9962c;
+  --metal-elite: #1d3fe0;
+
+  /* Semánticos */
+  --background: var(--papel);
+  --foreground: var(--tinta);
+  --card: var(--cal);
+  --card-foreground: var(--tinta);
+  --popover: var(--cal);
+  --popover-foreground: var(--tinta);
+  --primary: var(--cobalto);
+  --primary-foreground: #ffffff;
+  --secondary: #e4e7ee;
+  --secondary-foreground: var(--tinta);
+  --muted: #eaecf2;
+  --muted-foreground: #59637a;
+  --accent: var(--oro);
+  --accent-foreground: var(--tinta);
+  /* El oro no es legible como texto sobre superficies claras: para texto va su tinta. */
+  --accent-ink: var(--oro-tinta);
+  --success: var(--exito);
+  --success-foreground: #ffffff;
+  --success-surface: #e4f4ec;
+  --success-ink: var(--exito);
+  --destructive: var(--alerta);
+  --destructive-foreground: #ffffff;
+  --border: #dde1ea;
+  --input: #c9cfdc;
+  --ring: var(--cobalto);
+
+  --radius: 0.375rem;
+  --radius-card: 0.875rem;
+
+  /* La banda del marcador y su regla de metales */
+  --banda-alto: #16224a;
+  --banda-bajo: var(--tinta);
+  --banda-texto: #f5f7fc;
+  --banda-texto-tenue: #b9c4dd;
 }
 
 .dark {
-  --background: #0f172a;
-  --foreground: #f8fafc;
-  --card: #1e293b;
-  --card-foreground: #f8fafc;
-  --popover: #1e293b;
-  --popover-foreground: #f8fafc;
-  --primary: #38bdf8;
-  --primary-foreground: #0f172a;
-  --secondary: #334155;
-  --secondary-foreground: #f8fafc;
-  --muted: #1e293b;
-  --muted-foreground: #94a3b8;
-  --accent: #fbbf24;
-  --accent-foreground: #0f172a;
-  --destructive: #f87171;
-  --destructive-foreground: #0f172a;
-  --border: #334155;
-  --input: #334155;
-  --ring: #38bdf8;
+  color-scheme: dark;
+
+  --background: var(--tinta);
+  --foreground: #e8ecf5;
+  --card: #141c2e;
+  --card-foreground: #e8ecf5;
+  --popover: #141c2e;
+  --popover-foreground: #e8ecf5;
+  --primary: #7aa0ff;
+  --primary-foreground: #08101f;
+  --secondary: #1e2740;
+  --secondary-foreground: #e8ecf5;
+  --muted: #1a2237;
+  --muted-foreground: #96a1b8;
+  --accent: var(--oro);
+  --accent-foreground: #0b1220;
+  --accent-ink: #f5c542;
+  --success: #34c48b;
+  --success-foreground: #05261a;
+  --success-surface: #102f27;
+  --success-ink: #48d69c;
+  --destructive: #ff6b78;
+  --destructive-foreground: #2a0508;
+  --border: #253049;
+  --input: #33405d;
+  --ring: #7aa0ff;
+
+  --metal-novato: #97a2b5;
+  --metal-plata: #b3bccc;
+  --metal-elite: #7aa0ff;
+
+  /*
+   * En oscuro el suelo de la página ya es la tinta: si la banda terminara en el
+   * mismo valor, el panel se disolvería en el fondo. Sube los dos extremos.
+   */
+  --banda-alto: #22315a;
+  --banda-bajo: #131d35;
 }
 
 @theme inline {
+  --font-sans: var(--ff-body), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--ff-display), var(--ff-body), ui-sans-serif, sans-serif;
+  --font-mono: var(--ff-mono), ui-monospace, monospace;
+
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -69,35 +124,99 @@
   --color-muted-foreground: var(--muted-foreground);
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
+  --color-accent-ink: var(--accent-ink);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-success-surface: var(--success-surface);
+  --color-success-ink: var(--success-ink);
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
-  --color-night-blue: var(--night-blue);
-  --color-mustard: var(--mustard);
-  --color-orange: var(--orange);
-  --color-sky-blue: var(--sky-blue);
+
+  --color-tinta: var(--tinta);
+  --color-cobalto: var(--cobalto);
+  --color-oro: var(--oro);
+  --color-banda: var(--banda-bajo);
+  --color-banda-texto: var(--banda-texto);
+  --color-banda-tenue: var(--banda-texto-tenue);
+  --color-metal-novato: var(--metal-novato);
+  --color-metal-bronce: var(--metal-bronce);
+  --color-metal-plata: var(--metal-plata);
+  --color-metal-oro: var(--metal-oro);
+  --color-metal-elite: var(--metal-elite);
+
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-md: var(--radius);
+  --radius-lg: 0.625rem;
+  --radius-xl: var(--radius-card);
 }
 
 @layer base {
   * {
     @apply border-border;
   }
+
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background font-sans text-foreground;
+  }
+
+  /*
+   * Anillo de foco de base: las tarjetas envueltas en <Link> no tenían ninguno.
+   * Los componentes con su propio `outline-none` + ring (botones shadcn) ganan
+   * por capa de utilidades y conservan el suyo.
+   */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
   }
 }
 
-/* Gradient backgrounds */
-.gradient-bg {
-  background: linear-gradient(135deg, var(--night-blue) 0%, #0f172a 100%);
+/* La banda del marcador. Solo donde hay un resultado que anunciar. */
+.banda-marcador {
+  position: relative;
+  background: linear-gradient(168deg, var(--banda-alto) 0%, var(--banda-bajo) 100%);
+  color: var(--banda-texto);
 }
 
-.card-gradient {
-  background: linear-gradient(180deg, rgba(30, 58, 95, 0.1) 0%, transparent 100%);
+/* La regla de metales: la firma que ata banda y pista de nivel. */
+.banda-marcador::after {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  bottom: 0;
+  height: 3px;
+  background: linear-gradient(
+    90deg,
+    var(--metal-bronce) 0 25%,
+    var(--metal-plata) 25% 50%,
+    var(--metal-oro) 50% 75%,
+    var(--metal-elite) 75% 100%
+  );
+}
+
+/* La voz del marcador: cifras anchas, pesadas y tabulares. */
+.marcador {
+  font-family: var(--ff-display), ui-sans-serif, sans-serif;
+  font-variation-settings: "wdth" 112;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.03em;
+  line-height: 0.88;
+}
+
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  INSTITUTIONAL_EMAIL_DOMAINS: eafit.edu.co
+  SESSION_SECRET: ci-session-secret-not-a-real-one
+  APP_URL: http://localhost:3000
+  APP_TIMEZONE: America/Bogota
+  TZ: UTC
+  OTP_FIXED_CODE: "123456"
+
+jobs:
+  static:
+    name: lint · typecheck · unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+
+  integration:
+    name: integration (postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ghpoints
+          POSTGRES_PASSWORD: ghpoints
+          POSTGRES_DB: ghpoints
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ghpoints -d ghpoints"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://ghpoints:ghpoints@localhost:5432/ghpoints
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx prisma migrate deploy
+      - run: npm run db:seed
+      - run: npm run test:integration

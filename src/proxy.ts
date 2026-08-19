@@ -1,51 +1,92 @@
+import { randomBytes } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
+import { SESSION_COOKIE } from "@/lib/constants";
 
-const COOKIE_NAME = "ghpoints_admin";
+const CSP_HEADER = "content-security-policy";
+const NONCE_HEADER = "x-nonce";
 
-function isAuthed(req: NextRequest) {
-  const token = process.env.ADMIN_SESSION_TOKEN;
-  if (!token) return false;
-  return req.cookies.get(COOKIE_NAME)?.value === token;
+/**
+ * Next reads the nonce out of the request's Content-Security-Policy header and
+ * stamps it on its own inline bootstrap scripts, so the policy has to travel
+ * both ways: forwarded on the request, emitted on the response.
+ *
+ * `strict-dynamic` makes the browser ignore host sources for scripts — only the
+ * nonced bootstrap and whatever it loads can run. Styles keep `unsafe-inline`:
+ * Next and Tailwind inject inline style tags, and there is no nonce path for
+ * them today.
+ */
+function buildContentSecurityPolicy(nonce: string): string {
+  const isProduction = process.env.NODE_ENV === "production";
+  const scriptSrc = [
+    "script-src 'self'",
+    `'nonce-${nonce}'`,
+    "'strict-dynamic'",
+    ...(isProduction ? [] : ["'unsafe-eval'"]),
+  ].join(" ");
+  const connectSrc = isProduction ? "connect-src 'self'" : "connect-src 'self' ws: wss:";
+
+  return [
+    "default-src 'self'",
+    scriptSrc,
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "font-src 'self' data:",
+    connectSrc,
+    "worker-src 'self' blob:",
+    "frame-ancestors 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "object-src 'none'",
+  ].join("; ");
 }
 
-export function middleware(req: NextRequest) {
+function sessionRedirect(req: NextRequest): NextResponse | null {
   const { pathname } = req.nextUrl;
+  const hasSession = Boolean(req.cookies.get(SESSION_COOKIE)?.value);
 
-  // Deja pasar la pantalla de login y los endpoints de auth
-  if (
-    pathname.startsWith("/admin/login") ||
-    pathname.startsWith("/api/admin/login") ||
-    pathname.startsWith("/api/admin/logout")
-  ) {
-    return NextResponse.next();
+  const isApp = pathname === "/app" || pathname.startsWith("/app/");
+  const isAdmin = pathname === "/admin" || pathname.startsWith("/admin/");
+  const isLogin = pathname === "/login" || pathname.startsWith("/login/");
+
+  if ((isApp || isAdmin) && !hasSession) {
+    const url = req.nextUrl.clone();
+    url.pathname = "/login";
+    url.searchParams.set("next", pathname);
+    return NextResponse.redirect(url);
   }
 
-  // Protege páginas /admin/*
-  if (pathname.startsWith("/admin")) {
-    if (!isAuthed(req)) {
-      const url = req.nextUrl.clone();
-      url.pathname = "/admin/login";
-      url.searchParams.set("next", pathname);
-      return NextResponse.redirect(url);
-    }
+  if (isLogin && hasSession && !req.nextUrl.searchParams.get("next")) {
+    const url = req.nextUrl.clone();
+    url.pathname = "/app";
+    return NextResponse.redirect(url);
   }
 
-  // Protege API de escritura (todo lo que NO sea GET/HEAD/OPTIONS)
-  if (pathname.startsWith("/api")) {
-    const method = req.method.toUpperCase();
-    const isRead = method === "GET" || method === "HEAD" || method === "OPTIONS";
+  return null;
+}
 
-    if (!isRead && !isAuthed(req)) {
-      return new NextResponse(JSON.stringify({ error: "Unauthorized" }), {
-        status: 401,
-        headers: { "content-type": "application/json" },
-      });
-    }
+export function proxy(req: NextRequest) {
+  const nonce = randomBytes(16).toString("base64");
+  const csp = buildContentSecurityPolicy(nonce);
+
+  const redirect = sessionRedirect(req);
+  if (redirect) {
+    redirect.headers.set(CSP_HEADER, csp);
+    return redirect;
   }
 
-  return NextResponse.next();
+  const requestHeaders = new Headers(req.headers);
+  requestHeaders.set(NONCE_HEADER, nonce);
+  requestHeaders.set(CSP_HEADER, csp);
+
+  const response = NextResponse.next({ request: { headers: requestHeaders } });
+  response.headers.set(CSP_HEADER, csp);
+  return response;
 }
 
 export const config = {
-  matcher: ["/admin/:path*", "/api/:path*"],
+  matcher: [
+    // Everything except Next's own static output and image files, so the policy
+    // reaches every document. Auth redirects stay scoped inside sessionRedirect.
+    "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|woff2?)$).*)",
+  ],
 };
