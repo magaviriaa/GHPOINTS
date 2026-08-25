@@ -427,6 +427,20 @@
                   "kind": "scalar"
                 }
               },
+              "cancelReason": {
+                "nullable": true,
+                "type": {
+                  "codecId": "pg/text@1",
+                  "kind": "scalar"
+                }
+              },
+              "cancelledAt": {
+                "nullable": true,
+                "type": {
+                  "codecId": "pg/timestamptz-string@1",
+                  "kind": "scalar"
+                }
+              },
               "committeeId": {
                 "nullable": true,
                 "type": {
@@ -666,6 +680,12 @@
                 },
                 "attendanceTokenHash": {
                   "column": "attendanceTokenHash"
+                },
+                "cancelReason": {
+                  "column": "cancelReason"
+                },
+                "cancelledAt": {
+                  "column": "cancelledAt"
                 },
                 "committeeId": {
                   "column": "committeeId"
@@ -3175,6 +3195,16 @@
                   "nativeType": "text",
                   "nullable": true
                 },
+                "cancelReason": {
+                  "codecId": "pg/text@1",
+                  "nativeType": "text",
+                  "nullable": true
+                },
+                "cancelledAt": {
+                  "codecId": "pg/timestamptz-string@1",
+                  "nativeType": "timestamptz",
+                  "nullable": true
+                },
                 "committeeId": {
                   "codecId": "pg/text@1",
                   "nativeType": "text",
@@ -5615,7 +5645,7 @@
         "kind": "postgres-schema"
       }
     },
-    "storageHash": "8a0c7a42a8bbce4e9220a84d87deccfd3a0ced6eb65fc2f63b0198e9cc862bc0"
+    "storageHash": "b12d61e02ed5cea3b7164f2e9fc1d79ef67fc031e04975727a33fb7867ca864a"
   },
   "execution": {
     "executionHash": "ad4abfd46a2520d74dd363e4bb247375feca9f577a6712a97a45b7782a004461",

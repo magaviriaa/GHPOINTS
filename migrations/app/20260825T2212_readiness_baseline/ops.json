@@ -1,0 +1,103 @@
+[
+  {
+    "id": "column.public.Activity.cancelReason",
+    "label": "Add column \"cancelReason\" to \"Activity\"",
+    "operationClass": "additive",
+    "target": {
+      "id": "postgres",
+      "details": {
+        "schema": "public",
+        "objectType": "column",
+        "name": "cancelReason",
+        "table": "Activity"
+      }
+    },
+    "precheck": [
+      {
+        "description": "ensure column \"cancelReason\" is missing",
+        "sql": "SELECT NOT EXISTS (SELECT 1 AS \"one\" FROM \"information_schema\".\"columns\" WHERE (\"table_schema\" = $1 AND \"table_name\" = $2 AND \"column_name\" = $3)) AS \"result\"",
+        "params": [
+          "public",
+          "Activity",
+          "cancelReason"
+        ]
+      }
+    ],
+    "execute": [
+      {
+        "description": "add column \"cancelReason\"",
+        "sql": "ALTER TABLE \"public\".\"Activity\" ADD COLUMN \"cancelReason\" text"
+      }
+    ],
+    "postcheck": [
+      {
+        "description": "verify column \"cancelReason\" exists",
+        "sql": "SELECT EXISTS (SELECT 1 AS \"one\" FROM \"information_schema\".\"columns\" WHERE (\"table_schema\" = $1 AND \"table_name\" = $2 AND \"column_name\" = $3)) AS \"result\"",
+        "params": [
+          "public",
+          "Activity",
+          "cancelReason"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "column.public.Activity.cancelledAt",
+    "label": "Add column \"cancelledAt\" to \"Activity\"",
+    "operationClass": "additive",
+    "target": {
+      "id": "postgres",
+      "details": {
+        "schema": "public",
+        "objectType": "column",
+        "name": "cancelledAt",
+        "table": "Activity"
+      }
+    },
+    "precheck": [
+      {
+        "description": "ensure column \"cancelledAt\" is missing",
+        "sql": "SELECT NOT EXISTS (SELECT 1 AS \"one\" FROM \"information_schema\".\"columns\" WHERE (\"table_schema\" = $1 AND \"table_name\" = $2 AND \"column_name\" = $3)) AS \"result\"",
+        "params": [
+          "public",
+          "Activity",
+          "cancelledAt"
+        ]
+      }
+    ],
+    "execute": [
+      {
+        "description": "add column \"cancelledAt\"",
+        "sql": "ALTER TABLE \"public\".\"Activity\" ADD COLUMN \"cancelledAt\" timestamptz"
+      }
+    ],
+    "postcheck": [
+      {
+        "description": "verify column \"cancelledAt\" exists",
+        "sql": "SELECT EXISTS (SELECT 1 AS \"one\" FROM \"information_schema\".\"columns\" WHERE (\"table_schema\" = $1 AND \"table_name\" = $2 AND \"column_name\" = $3)) AS \"result\"",
+        "params": [
+          "public",
+          "Activity",
+          "cancelledAt"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "column.public.AppConfig.value.jsonb-to-text",
+    "label": "Convert column \"AppConfig.value\" from jsonb to text",
+    "operationClass": "data",
+    "target": {
+      "id": "postgres"
+    },
+    "precheck": [],
+    "execute": [
+      {
+        "description": "convert \"AppConfig.value\" to text",
+        "sql": "ALTER TABLE \"public\".\"AppConfig\" ALTER COLUMN \"value\" TYPE text USING \"value\"::text",
+        "params": []
+      }
+    ],
+    "postcheck": []
+  }
+]

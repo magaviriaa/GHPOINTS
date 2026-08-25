@@ -263,6 +263,8 @@ model Activity {
   needsApproval          Boolean        @default(false)
   requireAttendanceToken Boolean        @default(false)
   attendanceTokenHash    String?
+  cancelledAt            TimestamptzString?
+  cancelReason           String?
   createdById            String
   createdBy              Member         @relation("ActivityCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
   createdAt              TimestamptzString       @default(now())
