@@ -15,7 +15,7 @@ flowchart TB
   end
   subgraph id [Identidad]
     IA["IdentityAccount"]
-    M["Member ACTIVE"]
+    M["Member vigente u honorario"]
   end
   subgraph sess [Sesión]
     Cookie["Cookie HttpOnly gh_session"]
@@ -31,6 +31,8 @@ flowchart TB
   Row --> Cookie
   Cookie --> Actor
 ```
+
+Login: vigente (`ACTIVE`) y honorario (`HONORARY`). Ranking, badges y denominador de comité: solo vigente. Licencia y retiro destruyen sesiones.
 
 `email_otp` **siempre** está habilitado como fallback (`getEnabledAuthProviders` antepone `email_otp` si falta en `AUTH_PROVIDERS`). Entra solo aparece si `AUTH_PROVIDERS` incluye `entra` **y** están `ENTRA_CLIENT_ID`, `ENTRA_CLIENT_SECRET`, `ENTRA_TENANT_ID`.
 
@@ -127,7 +129,7 @@ Detalles:
 `src/server/auth/session.ts`.
 
 - Token: 32 bytes hex. En DB: SHA-256. Cookie `gh_session`: HttpOnly, `SameSite=lax`, `Secure` en production, `path=/`, expira en **14 días**.
-- `getCurrentActor`: lee cookie → busca sesión → si venció la borra; si el miembro no está `ACTIVE` borra **todas** sus sesiones.
+- `getCurrentActor`: lee cookie → busca sesión → si venció la borra; si el miembro no puede autenticarse (`canAuthenticate`: vigente u honorario) borra **todas** sus sesiones.
 - `Actor`: `id`, `fullName`, `institutionalEmail`, `memberType`, `status`, `sessionId`, `roles[]` (`role` + `committeeId`).
 - Logout: borra fila + cookie vacía (`logoutAction`).
 - Inactivar integrante: `destroyMemberSessions`.

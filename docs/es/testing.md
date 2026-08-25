@@ -42,6 +42,10 @@ Sin base de datos. Cubren funciones puras y contratos de error:
 
 `isUniqueConstraint` reconoce la unique de Postgres (`sqlState === "23505"`). El mensaje `ALREADY_REGISTERED` es el contrato de duplicado de asistencia.
 
+## Unitarios — `tests/unit/timezone.test.ts`
+
+Ventanas de semana/mes con el proceso en una zona con DST. `isPast` no trata un timestamptz con offset (p. ej. `-05:00`) como vencido frente al mismo instante en `Z`.
+
 ## Integración — Postgres
 
 Crean filas con timestamp en correo/nombre y las borran en `afterAll`.

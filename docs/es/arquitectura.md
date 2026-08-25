@@ -10,7 +10,7 @@ flowchart TB
     Pages["src/app/** páginas RSC"]
     Client["componentes client: forms, QR, login"]
   end
-  subgraph edge [Edge]
+  subgraph proxy [Proxy Node]
     MW["src/proxy.ts\ncookie + CSP con nonce"]
   end
   subgraph actions [Server actions]
@@ -102,7 +102,7 @@ sequenceDiagram
 
 `getCurrentActor` está envuelto en `React.cache`, así que layout + página del mismo render comparten una sola lectura de sesión.
 
-## Middleware vs autorización
+## Proxy vs autorización
 
 `src/proxy.ts` (convención de Next 16; antes `middleware.ts`, deprecada) solo mira si existe la cookie `SESSION_COOKIE` (`gh_session` en `src/lib/constants.ts`) y solo redirige en `/app`, `/admin` y `/login`. Su matcher es amplio —todo menos la salida estática de Next y los archivos de imagen— porque además emite la CSP con nonce en cada documento (ADR-022). Corre en runtime Node, no Edge.
 

@@ -22,7 +22,7 @@ npm run db:seed
 npm run dev            # http://localhost:3000
 ```
 
-`npm run db:reset` equivale a init + constraints + seed (destructivo).
+`npm run db:reset` equivale a init + constraints + seed (destructivo). Si la base ya está firmada, `prisma db init --yes` puede pedir consentimiento: `docker compose down -v` y luego el reset.
 
 Postgres Homebrew: en `.env.example` hay un comentario con `postgresql://USER@localhost:5432/ghpoints`. Docker:
 
@@ -57,6 +57,8 @@ Definidas en `.env.example` y validadas por Zod en `src/server/config/env.ts`. *
 | `RESEND_API_KEY` | No | Vacío → adapter consola |
 | `OTP_TTL_SECONDS` | No | `600` |
 | `OTP_FIXED_CODE` | No | Solo si `NODE_ENV !== production` |
+| `OTP_MAX_PER_EMAIL` | No | `5` — retos OTP por correo en 15 min |
+| `OTP_MAX_PER_IP` | No | `12` — retos OTP por IP en 15 min |
 | `MAGIC_LINK_SECRET` | No | Vacío → `SESSION_SECRET` |
 | `IMPORT_SECRET` | No | Bearer de import Forms; si vacío, solo sesión admin |
 | `AUTH_PROVIDERS` | No | `email_otp`. Añadir `entra` para SSO |

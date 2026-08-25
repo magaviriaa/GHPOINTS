@@ -37,7 +37,7 @@ Si llegas a un término en mayúsculas (Integrante, Temporada, Ledger, Score de 
 Estos archivos ya existían y se mantienen como fuente de verdad de **decisiones** y **operación externa**:
 
 - [`CONTEXT.md`](../../CONTEXT.md) — glosario de costuras del dominio.
-- [`docs/decisions.md`](../decisions.md) — ADR-001 a ADR-020.
+- [`docs/decisions.md`](../decisions.md) — ADR-001 a ADR-025.
 - [`docs/backlog.md`](../backlog.md) — P0–P3 hecho, fórmulas alternativas, deuda.
 - [`docs/entra-sso.md`](../entra-sso.md) — cómo encender OIDC.
 - [`docs/teams.md`](../teams.md) — webhook Incoming de Teams.

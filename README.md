@@ -66,8 +66,10 @@ También:
 ## Tests
 
 ```bash
-npm test
+npm test                  # tests/unit
+npm run test:integration  # Postgres
 npm run test:e2e
+npm run typecheck
 ```
 
 ## Importación Forms

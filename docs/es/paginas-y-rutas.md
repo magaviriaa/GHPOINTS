@@ -1,6 +1,6 @@
 # Páginas y rutas
 
-Next.js App Router. Autorización de página: layout `/app` exige sesión (`requirePageActor`); layout `/admin` exige ADMIN (`requirePageAdmin`). Middleware: cookie presente en `/app`, `/admin`, `/login` (ver [arquitectura.md](./arquitectura.md)).
+Next.js App Router. Autorización de página: layout `/app` exige sesión (`requirePageActor`); layout `/admin` exige ADMIN (`requirePageAdmin`). Proxy (`src/proxy.ts`): cookie presente en `/app`, `/admin`, `/login` (ver [arquitectura.md](./arquitectura.md)).
 
 Las mutaciones van a server actions salvo las API listadas al final.
 

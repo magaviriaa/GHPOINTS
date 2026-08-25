@@ -22,7 +22,7 @@ Documentación del código actual: [docs/es/README.md](es/README.md).
 
 ## Pase de endurecimiento (post-auditoría)
 
-- Redirects validados (`safeRedirectPath`), CSV/XLSX sin formula injection, HTML de correos escapado, cabeceras de seguridad + CSP Report-Only (ADR-022).
+- Redirects validados (`safeRedirectPath`), CSV/XLSX sin formula injection, HTML de correos escapado, cabeceras de seguridad + CSP en **enforce** con nonce (ADR-022).
 - Validación Zod de actividades (puntos, fechas, ventana).
 - Trabajo derivado del registro fuera del request y coalescido (ADR-021); `recomputeActivityScores` sin materializar miembros.
 - `error.tsx` / `global-error.tsx` / `not-found.tsx` en App Router; `loading.tsx` solo donde no rompe (ADR-024).
