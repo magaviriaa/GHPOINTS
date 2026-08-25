@@ -145,7 +145,7 @@ export default async function AdminPointsPage() {
                 header: "Acción",
                 actions: true,
                 cell: (row) =>
-                  row.type !== "REVERSAL" ? (
+                  row.type !== "REVERSAL" && row.type !== "ACTIVITY" && !row.isReversed ? (
                     <ClientForm action={adminReversePointsAction} successMessage="Revertido.">
                       <input type="hidden" name="transactionId" value={row.id} />
                       <input type="hidden" name="reason" value="Reversión administrativa" />
@@ -154,7 +154,13 @@ export default async function AdminPointsPage() {
                       </SubmitButton>
                     </ClientForm>
                   ) : (
-                    <span className="text-xs text-muted-foreground">ya es una reversión</span>
+                    <span className="text-xs text-muted-foreground">
+                      {row.type === "ACTIVITY"
+                        ? "corrige la asistencia"
+                        : row.isReversed
+                          ? "ya revertido"
+                          : "es una reversión"}
+                    </span>
                   ),
               },
             ]}

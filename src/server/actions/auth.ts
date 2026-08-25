@@ -5,7 +5,7 @@ import { redirect } from "next/navigation";
 import { completeEmailOtp, consumeMagicLinkLogin, logoutCurrentSession, startEmailOtp } from "@/server/auth/identity";
 import { hasAdminRole } from "@/server/domain/authorization";
 import { toUserMessage } from "@/server/domain/errors";
-import { safeRedirectPath } from "@/lib/redirect";
+import { safePostLoginPath } from "@/lib/redirect";
 
 const emailSchema = z.string().email("Ingresa un correo válido.");
 const otpSchema = z.string().regex(/^\d{6}$/, "El código debe tener 6 dígitos.");
@@ -44,7 +44,7 @@ export async function verifyOtpAction(formData: FormData): Promise<ActionResult>
     return { ok: false, message: toUserMessage(error) };
   }
 
-  const safeNext = safeRedirectPath(next);
+  const safeNext = safePostLoginPath(next);
   redirect(isAdminUser && (safeNext === "/app" || safeNext === "/") ? "/admin" : safeNext);
 }
 
@@ -63,7 +63,7 @@ export async function consumeMagicLinkAction(formData: FormData): Promise<Action
     return { ok: false, message: toUserMessage(error) };
   }
 
-  const safeNext = safeRedirectPath(next);
+  const safeNext = safePostLoginPath(next);
   redirect(isAdminUser && (safeNext === "/app" || safeNext === "/") ? "/admin" : safeNext);
 }
 

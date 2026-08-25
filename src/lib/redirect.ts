@@ -12,3 +12,15 @@ export function safeRedirectPath(value: string | null | undefined, fallback = DE
   if (candidate.includes("\n") || candidate.includes("\r")) return fallback;
   return candidate;
 }
+
+/** A safe redirect that cannot send an authenticated user back into the login flow. */
+export function safePostLoginPath(
+  value: string | null | undefined,
+  fallback = DEFAULT_PATH
+): string {
+  const candidate = safeRedirectPath(value, fallback);
+  const pathname = candidate.split(/[?#]/, 1)[0] ?? candidate;
+  if (pathname === "/login" || pathname.startsWith("/login/")) return fallback;
+  if (pathname === "/api/auth" || pathname.startsWith("/api/auth/")) return fallback;
+  return candidate;
+}

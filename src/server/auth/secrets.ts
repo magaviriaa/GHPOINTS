@@ -40,8 +40,7 @@ export function generateAttendanceToken(): string {
 }
 
 export function safeEqual(a: string, b: string): boolean {
-  const left = Buffer.from(a);
-  const right = Buffer.from(b);
-  if (left.length !== right.length) return false;
+  const left = createHash("sha256").update(a).digest();
+  const right = createHash("sha256").update(b).digest();
   return timingSafeEqual(left, right);
 }

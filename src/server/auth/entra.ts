@@ -12,10 +12,19 @@ import {
   getEnv,
   isEntraConfigured,
 } from "@/server/config/env";
-import { isAllowedEmailDomain, normalizeEmail } from "@/server/auth/email";
+import {
+  isAllowedEmailDomain,
+  isValidEmailAddress,
+  normalizeEmail,
+} from "@/server/auth/email";
 import { hashSecret, safeEqual } from "@/server/auth/secrets";
 import { ENTRA_STATE_COOKIE } from "@/lib/constants";
-import { entraEmailFromClaims, isEntraTidAllowed } from "@/server/auth/entra-pure";
+import { safePostLoginPath } from "@/lib/redirect";
+import {
+  entraAllowedIssuers,
+  entraEmailFromClaims,
+  isEntraTidAllowed,
+} from "@/server/auth/entra-pure";
 import { DomainError, ErrorCodes } from "@/server/domain/errors";
 import { canAuthenticate } from "@/server/domain/members-pure";
 
@@ -100,7 +109,7 @@ export async function buildEntraAuthorizationUrl(next: string): Promise<string> 
   const nonce = randomBytes(16).toString("hex");
   const verifier = randomBytes(32).toString("base64url");
   const challenge = createHash("sha256").update(verifier).digest("base64url");
-  const safeNext = next.startsWith("/") ? next : "/app";
+  const safeNext = safePostLoginPath(next);
   const state: EntraState = {
     nonce,
     next: safeNext,
@@ -189,8 +198,10 @@ export async function completeEntraCallback(input: {
   const jwks = createRemoteJWKSet(
     new URL(`https://login.microsoftonline.com/${env.ENTRA_TENANT_ID}/discovery/v2.0/keys`)
   );
+  const allowedTids = getEntraAllowedTids();
   const verified = await jwtVerify(tokenParsed.data.id_token, jwks, {
     audience: env.ENTRA_CLIENT_ID,
+    issuer: entraAllowedIssuers(env.ENTRA_TENANT_ID, allowedTids),
   });
   const claimsParsed = entraClaimsSchema.safeParse(verified.payload);
   if (!claimsParsed.success) {
@@ -200,7 +211,7 @@ export async function completeEntraCallback(input: {
   if (claims.nonce !== pending.nonce) {
     throw new DomainError(ErrorCodes.UNAUTHORIZED, "La sesión de Microsoft no es válida.", 401);
   }
-  if (!isEntraTidAllowed(claims.tid, env.ENTRA_TENANT_ID, getEntraAllowedTids())) {
+  if (!isEntraTidAllowed(claims.tid, env.ENTRA_TENANT_ID, allowedTids)) {
     throw new DomainError(
       ErrorCodes.FORBIDDEN,
       "Este directorio de Microsoft no está permitido.",
@@ -213,7 +224,11 @@ export async function completeEntraCallback(input: {
     preferred_username: claims.preferred_username,
     upn: claims.upn,
   });
-  if (!email || !isAllowedEmailDomain(email, getAllowedEmailDomains())) {
+  if (
+    !email ||
+    !isValidEmailAddress(email) ||
+    !isAllowedEmailDomain(email, getAllowedEmailDomains())
+  ) {
     throw new DomainError(
       ErrorCodes.INVALID_EMAIL_DOMAIN,
       "Usa tu correo institucional.",

@@ -71,10 +71,15 @@ export function getEnabledAuthProviders(): AuthProviderName[] {
 
 export function isEntraConfigured(): boolean {
   const env = getEnv();
+  const tenantId = env.ENTRA_TENANT_ID.trim().toLowerCase();
+  const tenantAllowed =
+    (tenantId !== "organizations" && tenantId !== "common") ||
+    getEntraAllowedTids().length > 0;
   return (
     env.ENTRA_CLIENT_ID.trim().length > 0 &&
     env.ENTRA_CLIENT_SECRET.trim().length > 0 &&
-    env.ENTRA_TENANT_ID.trim().length > 0
+    tenantId.length > 0 &&
+    tenantAllowed
   );
 }
 

@@ -115,12 +115,14 @@ Detalles:
 - Redirect: `{APP_URL}/api/auth/entra/callback`.
 - State firmado: payload base64url + HMAC-like `SHA-256(SESSION_SECRET:entra:payload)` en cookie `gh_entra_state` (HttpOnly, 10 min). El `state` query es el `nonce`.
 - PKCE: `code_verifier` en el state; challenge SHA-256 base64url.
-- `id_token` verificado con JWKS del tenant, `aud` = client id, `nonce` debe coincidir.
+- `id_token` verificado con JWKS del tenant, `aud` = client id, `nonce` debe coincidir y `iss` debe ser exactamente el issuer v2 de uno de los tenants permitidos.
 - `isEntraTidAllowed`: si hay `ENTRA_ALLOWED_TIDS`, el `tid` del token debe estar en la lista. Si el tenant env es `organizations` o `common` **sin** allowlist → rechazo. Si es un GUID de tenant, el `tid` debe coincidir.
 - Email: `email` || `preferred_username` || `upn` (`entraEmailFromClaims`). Debe ser dominio institucional.
 - Matching: `Member.institutionalEmail`. No hay JIT provisioning.
 - `providerUserId` Entra = `oid`.
 - Fallo: redirect a `/login?error=...` y el OTP sigue disponible.
+
+Los destinos post-login pasan por `safePostLoginPath`: solo acepta rutas same-origin y excluye `/login` y `/api/auth`, evitando open redirects y bucles de autenticación.
 
 `GET /api/auth/entra/start` sin Entra configurado → `/login?error=entra`.
 

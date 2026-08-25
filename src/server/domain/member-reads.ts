@@ -22,7 +22,7 @@ export async function getMemberHome(memberId: string) {
       getMemberSeasonStanding(memberId, season?.id),
       getMemberCommitteeStandings(memberId, season?.id),
       listMemberPointHistory(memberId, { seasonId: season?.id, take: 5 }),
-      getNextOpenActivity(),
+      getNextOpenActivity(season?.id),
       listActiveMemberships(memberId),
       season ? sumMemberPoints(memberId, season.id) : Promise.resolve(0),
     ]);
@@ -63,7 +63,7 @@ export async function getMemberProfile(memberId: string) {
 export async function getMemberActivities() {
   const season = await getActiveSeason();
   const [open, seasonActivities] = await Promise.all([
-    getOpenActivities(),
+    getOpenActivities(season?.id),
     listPublishedActivities(season?.id),
   ]);
   return { season, open, seasonActivities };

@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { safeRedirectPath } from "@/lib/redirect";
+import { safePostLoginPath, safeRedirectPath } from "@/lib/redirect";
 import { escapeHtml } from "@/lib/text";
-import { escapeSpreadsheetCell } from "@/server/domain/export";
+import { escapeSpreadsheetCell, toXlsx } from "@/server/domain/export";
 import { parseActivityFields } from "@/server/domain/activities";
+import { assertManualPointsValue } from "@/server/domain/admin-points";
+import { formsJsonBodySchema, parseTabular } from "@/server/domain/import";
 import { computeCommitteeSnapshots } from "@/server/domain/scoring-pure";
 import { competitionRanks, rankingWindow } from "@/server/domain/ranking-pure";
 import { rangeForIsoWeek, startOfMonthUtc, startOfWeekUtc } from "@/lib/dates";
 import { ErrorCodes, isDomainError } from "@/server/domain/errors";
+import { safeEqual } from "@/server/auth/secrets";
 
 describe("safeRedirectPath", () => {
   it("keeps same-origin paths, including query strings", () => {
@@ -20,6 +23,24 @@ describe("safeRedirectPath", () => {
     expect(safeRedirectPath("https://evil.com")).toBe("/app");
     expect(safeRedirectPath("javascript:alert(1)")).toBe("/app");
     expect(safeRedirectPath(undefined)).toBe("/app");
+  });
+
+  it("keeps post-login redirects out of the authentication loop", () => {
+    expect(safePostLoginPath("/login")).toBe("/app");
+    expect(safePostLoginPath("/login/magic?token=secret")).toBe("/app");
+    expect(safePostLoginPath("/login#magic")).toBe("/app");
+    expect(safePostLoginPath("/api/auth/entra/start")).toBe("/app");
+    expect(safePostLoginPath("/api/auth#callback")).toBe("/app");
+    expect(safePostLoginPath("/app/rankings?period=week")).toBe(
+      "/app/rankings?period=week"
+    );
+  });
+});
+
+describe("constant-time secret comparison", () => {
+  it("compares equal and differently-sized inputs without changing semantics", () => {
+    expect(safeEqual("same", "same")).toBe(true);
+    expect(safeEqual("short", "a much longer secret")).toBe(false);
   });
 });
 
@@ -35,6 +56,46 @@ describe("export escaping", () => {
     expect(escapeSpreadsheetCell("Mateo Lopera")).toBe("Mateo Lopera");
     expect(escapeSpreadsheetCell(540)).toBe(540);
     expect(escapeSpreadsheetCell(null)).toBe(null);
+  });
+
+  it("round-trips an XLSX export through the hardened importer", () => {
+    const bytes = toXlsx(
+      [{ Nombre: "Ana Pérez", Correo: "ana@eafit.edu.co" }],
+      "Integrantes"
+    );
+    const rows = parseTabular(Uint8Array.from(bytes).buffer, "integrantes.xlsx", "MEMBERS");
+    expect(rows).toEqual([
+      {
+        fullName: "Ana Pérez",
+        email: "ana@eafit.edu.co",
+        memberTypeLabel: "",
+        committeeLabel: "",
+      },
+    ]);
+  });
+});
+
+describe("import limits", () => {
+  it("rejects unsupported extensions, oversized files and oversized JSON batches", () => {
+    const csv = new TextEncoder().encode("Nombre,Correo\nAna,ana@eafit.edu.co").buffer;
+    expect(() => parseTabular(csv, "integrantes.txt", "MEMBERS")).toThrow();
+    expect(() =>
+      parseTabular(new ArrayBuffer(10 * 1024 * 1024 + 1), "integrantes.csv", "MEMBERS")
+    ).toThrow();
+
+    const row = { email: "ana@eafit.edu.co", activityKey: "actividad" };
+    expect(formsJsonBodySchema.safeParse({ rows: Array.from({ length: 10_001 }, () => row) }).success)
+      .toBe(false);
+  });
+});
+
+describe("manual points validation", () => {
+  it("accepts non-zero safe integers and rejects invalid ledger values", () => {
+    expect(() => assertManualPointsValue(30)).not.toThrow();
+    expect(() => assertManualPointsValue(-5)).not.toThrow();
+    expect(() => assertManualPointsValue(0)).toThrow();
+    expect(() => assertManualPointsValue(2.5)).toThrow();
+    expect(() => assertManualPointsValue(Number.NaN)).toThrow();
   });
 });
 

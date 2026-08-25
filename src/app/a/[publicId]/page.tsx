@@ -36,6 +36,33 @@ export default async function PublicActivityPage({
 
   const { activity, attendance, memberships, registrationOpen, tokenRequired, tokenOk } = view;
   const needsApproval = activity.approvalMode === "MANUAL";
+  const now = new Date();
+  const registrationStart = new Date(activity.registrationStart);
+  const closedCopy =
+    activity.status === "CANCELLED"
+      ? {
+          title: "La actividad fue cancelada",
+          detail: "GH General canceló esta actividad; no admite nuevos registros.",
+        }
+      : activity.season.status === "CLOSED"
+        ? {
+            title: "La temporada está cerrada",
+            detail: "La foto final de esta temporada ya quedó congelada.",
+          }
+        : now < registrationStart
+          ? {
+              title: "El registro aún no abre",
+              detail: `Abre el ${formatDateTime(activity.registrationStart)}.`,
+            }
+          : activity.status !== "OPEN"
+            ? {
+                title: "El registro está cerrado",
+                detail: "GH General cerró el registro de esta actividad.",
+              }
+            : {
+                title: "El registro está cerrado",
+                detail: `Se cerró el ${formatDateTime(activity.registrationEnd)}.`,
+              };
 
   return (
     <div className="min-h-screen bg-background">
@@ -99,10 +126,10 @@ export default async function PublicActivityPage({
               />
             ) : (
               <div className="rounded-xl border border-dashed p-5 text-center">
-                <p className="font-display font-bold">El registro está cerrado</p>
+                <p className="font-display font-bold">{closedCopy.title}</p>
                 <p className="mt-2 text-sm text-muted-foreground">
-                  Se cerró el {formatDateTime(activity.registrationEnd)}. Si estuviste en la
-                  actividad, pídele a GH General que registre tu asistencia.
+                  {closedCopy.detail} Si estuviste en la actividad, pídele a GH General que
+                  registre tu asistencia.
                 </p>
               </div>
             )}

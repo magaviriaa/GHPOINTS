@@ -1,7 +1,10 @@
 import type { Metadata } from "next";
+import { redirect } from "next/navigation";
 
 import { MagicLinkConsumer } from "@/components/auth/magic-link-consumer";
-import { safeRedirectPath } from "@/lib/redirect";
+import { safePostLoginPath } from "@/lib/redirect";
+import { getCurrentActor } from "@/server/auth/session";
+import { hasAdminRole } from "@/server/domain/authorization";
 import { Wordmark } from "@/components/brand/wordmark";
 
 export const metadata: Metadata = { title: "Enlace de acceso" };
@@ -11,9 +14,12 @@ export default async function MagicLoginPage({
 }: {
   searchParams: Promise<{ token?: string; next?: string }>;
 }) {
-  const params = await searchParams;
+  const [params, actor] = await Promise.all([searchParams, getCurrentActor()]);
   const token = params.token ?? "";
-  const next = safeRedirectPath(params.next);
+  const next = safePostLoginPath(params.next);
+  if (actor) {
+    redirect(hasAdminRole(actor.roles) && (next === "/app" || next === "/") ? "/admin" : next);
+  }
 
   return (
     <div className="min-h-screen bg-background">

@@ -1,8 +1,11 @@
 import type { Metadata } from "next";
+import { redirect } from "next/navigation";
 
 import { LoginForm } from "@/components/auth/login-form";
 import { isEntraLoginEnabled } from "@/server/config/env";
-import { safeRedirectPath } from "@/lib/redirect";
+import { getCurrentActor } from "@/server/auth/session";
+import { hasAdminRole } from "@/server/domain/authorization";
+import { safePostLoginPath } from "@/lib/redirect";
 import { Wordmark } from "@/components/brand/wordmark";
 
 export const metadata: Metadata = { title: "Entrar" };
@@ -12,8 +15,11 @@ export default async function LoginPage({
 }: {
   searchParams: Promise<{ next?: string; error?: string }>;
 }) {
-  const params = await searchParams;
-  const next = safeRedirectPath(params.next);
+  const [params, actor] = await Promise.all([searchParams, getCurrentActor()]);
+  const next = safePostLoginPath(params.next);
+  if (actor) {
+    redirect(hasAdminRole(actor.roles) && (next === "/app" || next === "/") ? "/admin" : next);
+  }
   const entraEnabled = isEntraLoginEnabled();
   const cameFromActivity = next.startsWith("/a/");
 

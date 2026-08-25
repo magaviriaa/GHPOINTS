@@ -46,18 +46,12 @@ function sessionRedirect(req: NextRequest): NextResponse | null {
 
   const isApp = pathname === "/app" || pathname.startsWith("/app/");
   const isAdmin = pathname === "/admin" || pathname.startsWith("/admin/");
-  const isLogin = pathname === "/login" || pathname.startsWith("/login/");
-
   if ((isApp || isAdmin) && !hasSession) {
     const url = req.nextUrl.clone();
+    const next = `${pathname}${req.nextUrl.search}`;
     url.pathname = "/login";
-    url.searchParams.set("next", pathname);
-    return NextResponse.redirect(url);
-  }
-
-  if (isLogin && hasSession && !req.nextUrl.searchParams.get("next")) {
-    const url = req.nextUrl.clone();
-    url.pathname = "/app";
+    url.search = "";
+    url.searchParams.set("next", next);
     return NextResponse.redirect(url);
   }
 

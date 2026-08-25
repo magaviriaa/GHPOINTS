@@ -3,7 +3,12 @@ import "server-only";
 import { db } from "@/server/db/prisma";
 import { isoNow, isPast } from "@/server/db/time";
 import { getAllowedEmailDomains, getEnv } from "@/server/config/env";
-import { emailDomain, isAllowedEmailDomain, normalizeEmail } from "@/server/auth/email";
+import {
+  emailDomain,
+  isAllowedEmailDomain,
+  isValidEmailAddress,
+  normalizeEmail,
+} from "@/server/auth/email";
 import {
   generateMagicToken,
   generateOtpCode,
@@ -21,7 +26,7 @@ export async function requestOtp(input: { email: string; ip?: string | null }) {
   const email = normalizeEmail(input.email);
   const allowed = getAllowedEmailDomains();
 
-  if (!email.includes("@") || !isAllowedEmailDomain(email, allowed)) {
+  if (!isValidEmailAddress(email) || !isAllowedEmailDomain(email, allowed)) {
     throw new DomainError(
       ErrorCodes.INVALID_EMAIL_DOMAIN,
       "Usa tu correo institucional.",
@@ -98,9 +103,7 @@ export async function verifyOtp(input: { email: string; code: string; ip?: strin
 
   const matches = safeEqual(challenge.codeHash, hashOtp(email, code));
   if (!matches) {
-    await db.orm.public.AuthChallenge.where({ id: challenge.id }).update({
-      attempts: challenge.attempts + 1,
-    });
+    await recordFailedOtpAttempt(challenge.id);
     throw new DomainError(ErrorCodes.OTP_INVALID, "El código no es válido.", 400);
   }
 
@@ -140,6 +143,25 @@ export async function consumeMagicLink(input: { token: string; ip?: string | nul
   return consumeChallengesAndLoadMember(challenge.email, challenge.id);
 }
 
+async function recordFailedOtpAttempt(challengeId: string): Promise<void> {
+  for (;;) {
+    const current = await db.orm.public.AuthChallenge.where({
+      id: challengeId,
+      consumedAt: null,
+    })
+      .select("attempts", "maxAttempts")
+      .first();
+    if (!current || current.attempts >= current.maxAttempts) return;
+
+    const updated = await db.orm.public.AuthChallenge.where({
+      id: challengeId,
+      consumedAt: null,
+      attempts: current.attempts,
+    }).updateAndCount({ attempts: current.attempts + 1 });
+    if (updated === 1) return;
+  }
+}
+
 async function consumeChallengesAndLoadMember(email: string, challengeId: string) {
   const member = await db.orm.public.Member.where({ institutionalEmail: email })
     .include("roles", (roles) => roles.select("role", "committeeId"))
@@ -154,7 +176,13 @@ async function consumeChallengesAndLoadMember(email: string, challengeId: string
 
   const now = isoNow();
   await db.transaction(async (tx) => {
-    await tx.orm.public.AuthChallenge.where({ id: challengeId }).update({ consumedAt: now });
+    const consumed = await tx.orm.public.AuthChallenge.where({
+      id: challengeId,
+      consumedAt: null,
+    }).updateAndCount({ consumedAt: now });
+    if (consumed !== 1) {
+      throw new DomainError(ErrorCodes.OTP_INVALID, "El código ya fue utilizado.", 400);
+    }
     await tx.orm.public.AuthChallenge.where({ email, consumedAt: null })
       .where((row) => row.id.neq(challengeId))
       .updateAll({ consumedAt: now });

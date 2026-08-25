@@ -1,5 +1,6 @@
 import type { MemberStatus, MemberType, RoleCode } from "@/server/db/types";
 import { DomainError, ErrorCodes } from "@/server/domain/errors";
+import { canAuthenticate } from "@/server/domain/members-pure";
 
 export type ActorRole = {
   role: RoleCode;
@@ -59,7 +60,7 @@ export function requireCommitteeViewer(actor: Actor | null, committeeId: string)
 }
 
 export function requireActor(actor: Actor | null): Actor {
-  if (!actor || actor.status !== "ACTIVE") {
+  if (!actor || !canAuthenticate(actor.status)) {
     throw new DomainError(
       ErrorCodes.UNAUTHORIZED,
       "Inicia sesión para continuar.",

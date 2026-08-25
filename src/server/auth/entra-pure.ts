@@ -14,6 +14,15 @@ export function isEntraTidAllowed(
   return normalizedTid.length > 0 && normalizedTid === normalizedTenant;
 }
 
+export function entraAllowedIssuers(tenantId: string, allowedTids: string[]): string[] {
+  const normalizedAllowed = allowedTids.map((tid) => tid.trim().toLowerCase()).filter(Boolean);
+  const normalizedTenant = tenantId.trim().toLowerCase();
+  const tids = normalizedAllowed.length > 0 ? normalizedAllowed : [normalizedTenant];
+  return tids
+    .filter((tid) => tid !== "common" && tid !== "organizations")
+    .map((tid) => `https://login.microsoftonline.com/${tid}/v2.0`);
+}
+
 export function entraEmailFromClaims(claims: {
   email?: string;
   preferred_username?: string;

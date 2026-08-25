@@ -101,6 +101,9 @@ export function rangeForIsoWeek(
   const diff = day === 0 ? 6 : day - 1;
   zoned.setHours(0, 0, 0, 0);
   zoned.setDate(zoned.getDate() - diff);
+  if (getISOWeek(zoned) !== parsed.week || getISOWeekYear(zoned) !== parsed.year) {
+    return null;
+  }
   const start = fromZonedTime(zoned, timeZone);
   const endZoned = new Date(zoned);
   endZoned.setDate(endZoned.getDate() + 7);
