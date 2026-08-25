@@ -7,7 +7,11 @@ import Papa from "papaparse";
 import * as XLSX from "xlsx";
 import { db } from "@/server/db/prisma";
 import { isoNow, toIso } from "@/server/db/time";
-import { normalizeEmail, isAllowedEmailDomain } from "@/server/auth/email";
+import {
+  normalizeEmail,
+  isAllowedEmailDomain,
+  isValidEmailAddress,
+} from "@/server/auth/email";
 import { getAllowedEmailDomains } from "@/server/config/env";
 import { DomainError, ErrorCodes } from "@/server/domain/errors";
 import { writeAuditLog } from "@/server/domain/audit";
@@ -19,8 +23,13 @@ import { MAX_MEMBER_COMMITTEES } from "@/lib/constants";
 import { uniqueCommitteeIds } from "@/server/domain/members-pure";
 import type { Actor } from "@/server/domain/authorization";
 import { requireAdmin } from "@/server/domain/authorization";
+import { lockActivityRow, lockSeasonRow } from "@/server/domain/locks";
+import { assertSeasonWritable } from "@/server/domain/season";
 
 export type ImportKind = "MEMBERS" | "FORMS";
+
+const MAX_IMPORT_FILE_BYTES = 10 * 1024 * 1024;
+const MAX_IMPORT_ROWS = 10_000;
 
 export type ImportIssue = { row: number; message: string; level: "error" | "warning" };
 
@@ -68,7 +77,7 @@ export const formsJsonRowSchema = z
 
 export const formsJsonBodySchema = z
   .object({
-    rows: z.array(formsJsonRowSchema).min(1),
+    rows: z.array(formsJsonRowSchema).min(1).max(MAX_IMPORT_ROWS),
   })
   .strict();
 
@@ -201,20 +210,45 @@ type SpreadsheetTable = {
 
 function parseSpreadsheet(buffer: ArrayBuffer, filename: string): SpreadsheetTable {
   const lower = filename.toLowerCase();
+  if (buffer.byteLength > MAX_IMPORT_FILE_BYTES) {
+    throw new DomainError(
+      ErrorCodes.VALIDATION,
+      "El archivo supera el límite de 10 MB.",
+      400
+    );
+  }
   if (lower.endsWith(".csv")) {
     const text = new TextDecoder().decode(buffer);
     const parsed = Papa.parse<string[]>(text, {
       header: false,
       skipEmptyLines: true,
     });
+    if (parsed.errors.length > 0) {
+      throw new DomainError(
+        ErrorCodes.VALIDATION,
+        parsed.errors[0]?.message ?? "El CSV no tiene un formato válido.",
+        400
+      );
+    }
     const [headerRow, ...dataRows] = parsed.data;
     if (!headerRow || headerRow.length === 0) {
       throw new DomainError(ErrorCodes.VALIDATION, "El archivo no tiene encabezados.", 400);
+    }
+    if (dataRows.length > MAX_IMPORT_ROWS) {
+      throw new DomainError(
+        ErrorCodes.VALIDATION,
+        `El archivo no puede tener más de ${MAX_IMPORT_ROWS} filas.`,
+        400
+      );
     }
     return {
       headers: headerRow.map((value) => String(value ?? "")),
       rows: dataRows.map((row) => headerRow.map((_, position) => String(row[position] ?? ""))),
     };
+  }
+
+  if (!lower.endsWith(".xlsx")) {
+    throw new DomainError(ErrorCodes.VALIDATION, "El archivo debe ser CSV o XLSX.", 400);
   }
 
   const workbook = XLSX.read(buffer, { type: "array" });
@@ -230,6 +264,13 @@ function parseSpreadsheet(buffer: ArrayBuffer, filename: string): SpreadsheetTab
   const [headerRow, ...dataRows] = matrix;
   if (!headerRow || headerRow.length === 0) {
     throw new DomainError(ErrorCodes.VALIDATION, "El archivo no tiene encabezados.", 400);
+  }
+  if (dataRows.length > MAX_IMPORT_ROWS) {
+    throw new DomainError(
+      ErrorCodes.VALIDATION,
+      `El archivo no puede tener más de ${MAX_IMPORT_ROWS} filas.`,
+      400
+    );
   }
   return {
     headers: headerRow.map((value) => String(value ?? "")),
@@ -295,7 +336,7 @@ export async function previewMemberImport(
   rows: MemberSpreadsheetRow[]
 ): Promise<MemberImportPreview> {
   const domains = getAllowedEmailDomains();
-  const committees = await db.orm.public.Committee.all();
+  const committees = await db.orm.public.Committee.where({ status: "ACTIVE" }).all();
   const bySlug = new Map(committees.map((committee) => [committee.slug, committee]));
   const byName = new Map(committees.map((committee) => [slugify(committee.name), committee]));
 
@@ -317,7 +358,7 @@ export async function previewMemberImport(
       errors.push({ row, level: "error", message: "Falta el nombre." });
       return;
     }
-    if (!email || !email.includes("@")) {
+    if (!isValidEmailAddress(email)) {
       errors.push({ row, level: "error", message: "Falta un correo válido." });
       return;
     }
@@ -458,12 +499,9 @@ export async function loadMemberImportPreview(input: { actor: Actor; previewId: 
   return { previewId: job.id, filename: job.filename, preview };
 }
 
-export async function consumeMemberImportPreview(previewId: string) {
-  await db.orm.public.ImportJob.where({ id: previewId }).update({ status: "CONSUMED" });
-}
-
 export async function commitMemberImport(input: {
   actor: Actor;
+  previewId: string;
   filename: string;
   preview: MemberImportPreview;
   ip?: string | null;
@@ -477,7 +515,7 @@ export async function commitMemberImport(input: {
     );
   }
 
-  const committees = await db.orm.public.Committee.all();
+  const committees = await db.orm.public.Committee.where({ status: "ACTIVE" }).all();
   const bySlug = new Map(committees.map((committee) => [committee.slug, committee]));
 
   await db.transaction(async (tx) => {
@@ -485,6 +523,22 @@ export async function commitMemberImport(input: {
       const existing = await tx.orm.public.Member.where({ institutionalEmail: row.email })
         .include("committees")
         .first();
+
+      const requestedCommittees = row.committeeSlugs.map((slug) => bySlug.get(slug));
+      if (requestedCommittees.some((committee) => committee === undefined)) {
+        throw new DomainError(
+          ErrorCodes.IMPORT_INVALID,
+          `Uno de los comités de ${row.email} ya no está disponible. Vuelve a generar la vista previa.`,
+          409
+        );
+      }
+      if (!existing && requestedCommittees.length === 0) {
+        throw new DomainError(
+          ErrorCodes.IMPORT_INVALID,
+          `${row.email} debe pertenecer al menos a un comité activo. Vuelve a generar la vista previa.`,
+          409
+        );
+      }
 
       const member =
         existing ??
@@ -502,9 +556,28 @@ export async function commitMemberImport(input: {
         });
       }
 
+      const requestedCommitteeIds = requestedCommittees.flatMap((committee) =>
+        committee ? [committee.id] : []
+      );
+      const activeCommitteeIds = (existing?.committees ?? [])
+        .filter((membership) => membership.isActive)
+        .map((membership) => membership.committeeId);
+      const combinedCommitteeIds = new Set([
+        ...activeCommitteeIds,
+        ...requestedCommitteeIds,
+      ]);
+      if (combinedCommitteeIds.size > MAX_MEMBER_COMMITTEES) {
+        throw new DomainError(
+          ErrorCodes.IMPORT_INVALID,
+          `${row.email} superaría el máximo de ${MAX_MEMBER_COMMITTEES} comités. Vuelve a generar la vista previa.`,
+          409
+        );
+      }
+
       for (const slug of row.committeeSlugs) {
         const committee = bySlug.get(slug);
-        if (!committee) continue;
+        // The availability check above guarantees this lookup.
+        if (!committee) throw new Error("Committee availability invariant violated");
         const active = (existing?.committees ?? []).find(
           (item) => item.committeeId === committee.id && item.isActive
         );
@@ -516,26 +589,34 @@ export async function commitMemberImport(input: {
       }
     }
 
-    await tx.orm.public.ImportJob.create({
-      type: "MEMBERS",
-      status: "COMMITTED",
-      filename: input.filename,
+    const job = await tx.orm.public.ImportJob.where({
+      id: input.previewId,
       createdById: input.actor.id,
+      type: "MEMBERS",
+      status: "PREVIEWED",
+    }).update({
+      status: "COMMITTED",
       summary: {
         valid: input.preview.valid.length,
         warnings: input.preview.warnings.length,
         errors: 0,
       },
     });
-  });
-
-  await writeAuditLog({
-    actorId: input.actor.id,
-    action: "MEMBERS_IMPORTED",
-    entityType: "ImportJob",
-    entityId: "members",
-    after: { filename: input.filename, count: input.preview.valid.length },
-    ip: input.ip,
+    if (!job) {
+      throw new DomainError(
+        ErrorCodes.CONFLICT,
+        "La vista previa ya fue consumida. Vuelve a cargar el archivo.",
+        409
+      );
+    }
+    await writeAuditLog(tx, {
+      actorId: input.actor.id,
+      action: "MEMBERS_IMPORTED",
+      entityType: "ImportJob",
+      entityId: job.id,
+      after: { filename: input.filename, count: input.preview.valid.length },
+      ip: input.ip,
+    });
   });
 }
 
@@ -571,15 +652,33 @@ export async function importFormsAttendances(input: {
       continue;
     }
 
-    const activity = await db.orm.public.Activity.where((rowActivity) =>
+    let activity = await db.orm.public.Activity.where((rowActivity) =>
       or(
         rowActivity.publicId.eq(row.activityKey),
-        rowActivity.name.eq(row.activityKey),
         rowActivity.id.eq(row.activityKey)
       )
-    ).first();
+    )
+      .include("season", (season) => season.select("status"))
+      .first();
+    if (!activity) {
+      const named = await db.orm.public.Activity.where({ name: row.activityKey })
+        .include("season", (season) => season.select("status"))
+        .limit(2)
+        .all();
+      if (named.length > 1) {
+        results.errors.push(
+          `Actividad ambigua: ${row.activityKey}. Usa el publicId para identificarla.`
+        );
+        continue;
+      }
+      activity = named[0] ?? null;
+    }
     if (!activity) {
       results.errors.push(`Actividad no encontrada: ${row.activityKey}`);
+      continue;
+    }
+    if (activity.season.status === "CLOSED") {
+      results.errors.push(`La temporada de ${row.activityKey} ya está cerrada.`);
       continue;
     }
 
@@ -619,6 +718,139 @@ export async function importFormsAttendances(input: {
   return results;
 }
 
+export async function commitFormsImport(input: {
+  actor: Actor;
+  previewId: string;
+  filename: string;
+  rows: FormsImportRow[];
+  ip?: string | null;
+}) {
+  requireAdmin(input.actor);
+  const outcome = await db.transaction(async (tx) => {
+    const resolved = [];
+    for (const row of input.rows) {
+      const email = normalizeEmail(row.email);
+      const member = await tx.orm.public.Member.where({ institutionalEmail: email }).first();
+      if (!member) {
+        throw new DomainError(
+          ErrorCodes.IMPORT_INVALID,
+          `El integrante ${email} ya no está disponible. Vuelve a generar la vista previa.`,
+          409
+        );
+      }
+      let activity = await tx.orm.public.Activity.where((candidate) =>
+        or(candidate.publicId.eq(row.activityKey), candidate.id.eq(row.activityKey))
+      ).first();
+      if (!activity) {
+        const named = await tx.orm.public.Activity.where({ name: row.activityKey }).limit(2).all();
+        if (named.length !== 1) {
+          throw new DomainError(
+            ErrorCodes.IMPORT_INVALID,
+            `La actividad ${row.activityKey} ya no se puede identificar. Usa su publicId y vuelve a generar la vista previa.`,
+            409
+          );
+        }
+        activity = named[0] ?? null;
+      }
+      if (!activity) {
+        throw new DomainError(ErrorCodes.IMPORT_INVALID, `Actividad no encontrada: ${row.activityKey}.`, 409);
+      }
+      resolved.push({ row, member, activity });
+    }
+
+    const seasonIds = [...new Set(resolved.map((item) => item.activity.seasonId))].sort();
+    for (const seasonId of seasonIds) {
+      const season = await lockSeasonRow(tx, seasonId);
+      assertSeasonWritable(season.status);
+    }
+    const lockedActivities = new Map();
+    for (const activityId of [...new Set(resolved.map((item) => item.activity.id))].sort()) {
+      const activity = await lockActivityRow(tx, activityId);
+      if (activity.status !== "OPEN" && activity.status !== "CLOSED") {
+        throw new DomainError(
+          ErrorCodes.IMPORT_INVALID,
+          `La actividad ${activity.name} ya no admite asistencias.`,
+          409
+        );
+      }
+      lockedActivities.set(activity.id, activity);
+    }
+
+    let created = 0;
+    let skipped = 0;
+    const touchedActivityIds = new Set<string>();
+    for (const item of resolved) {
+      const activity = lockedActivities.get(item.activity.id);
+      if (!activity) throw new Error("Locked activity invariant violated");
+      const existing = await tx.orm.public.Attendance.where({
+        activityId: activity.id,
+        memberId: item.member.id,
+      }).first();
+      if (existing) {
+        skipped += 1;
+        continue;
+      }
+      const attendance = await tx.orm.public.Attendance.create({
+        activityId: activity.id,
+        memberId: item.member.id,
+        status: "APPROVED",
+        registeredAt: item.row.registeredAt ? toIso(item.row.registeredAt) : isoNow(),
+        approvedAt: isoNow(),
+        approvedById: input.actor.id,
+        source: "MICROSOFT_FORMS",
+      });
+      await syncAttendanceCredit(tx, {
+        attendanceId: attendance.id,
+        memberId: item.member.id,
+        activity,
+        status: "APPROVED",
+        createdById: input.actor.id,
+      });
+      await writeAuditLog(tx, {
+        actorId: input.actor.id,
+        action: "ATTENDANCE_IMPORTED",
+        entityType: "Attendance",
+        entityId: attendance.id,
+        after: { activityId: activity.id, memberId: item.member.id, status: "APPROVED" },
+        ip: input.ip,
+      });
+      touchedActivityIds.add(activity.id);
+      created += 1;
+    }
+
+    const job = await tx.orm.public.ImportJob.where({
+      id: input.previewId,
+      createdById: input.actor.id,
+      type: "FORMS",
+      status: "PREVIEWED",
+    }).update({
+      status: "COMMITTED",
+      summary: { created, skipped, errors: 0 },
+    });
+    if (!job) {
+      throw new DomainError(
+        ErrorCodes.CONFLICT,
+        "La vista previa ya fue consumida. Vuelve a cargar el archivo.",
+        409
+      );
+    }
+    await writeAuditLog(tx, {
+      actorId: input.actor.id,
+      action: "ATTENDANCES_IMPORTED",
+      entityType: "ImportJob",
+      entityId: job.id,
+      after: { filename: input.filename, created, skipped },
+      ip: input.ip,
+    });
+    return { created, skipped, touchedActivityIds: [...touchedActivityIds] };
+  });
+
+  for (const activityId of outcome.touchedActivityIds) {
+    await recomputeActivityScores(activityId);
+  }
+  return outcome;
+}
+
 export type FormsImportPreview = {
   valid: FormsImportRow[];
   warnings: ImportIssue[];
@@ -647,7 +879,7 @@ export async function previewFormsImport(rows: FormsSpreadsheetRow[]): Promise<F
     const email = normalizeEmail(raw.email);
     const activityKey = raw.activityKey.trim();
     if (!email && !activityKey) return;
-    if (!email.includes("@")) {
+    if (!isValidEmailAddress(email)) {
       errors.push({ row, level: "error", message: "Falta un correo válido." });
       return;
     }

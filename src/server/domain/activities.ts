@@ -1,14 +1,18 @@
 import "server-only";
 
+import { and } from "@prisma/orm-postgres/orm-client";
 import { z } from "zod";
 import type { ActivityStatus, ActivityType, ApprovalMode } from "@/server/db/types";
-import { db } from "@/server/db/prisma";
+import { db, type Tx } from "@/server/db/prisma";
 import { isoNow, toDate, toIso } from "@/server/db/time";
 import { createPublicId } from "@/lib/public-id";
 import { DomainError, ErrorCodes } from "@/server/domain/errors";
 import { writeAuditLog } from "@/server/domain/audit";
 import { getActiveSeason, resolveSeason, assertSeasonWritable } from "@/server/domain/season";
 import { recomputeActivityScores } from "@/server/domain/scoring";
+import { runAttendanceEffects } from "@/server/domain/attendance-effects";
+import { syncAttendanceCredit } from "@/server/domain/attendance-credit";
+import { lockActivityRow, lockSeasonRow } from "@/server/domain/locks";
 import type { Actor } from "@/server/domain/authorization";
 import { isAdmin, requireAdmin, requireCommitteeLeader } from "@/server/domain/authorization";
 import {
@@ -18,6 +22,39 @@ import {
 } from "@/server/auth/secrets";
 
 const MAX_INDIVIDUAL_POINTS = 10_000;
+
+const ACTIVITY_TRANSITIONS = {
+  DRAFT: ["OPEN", "CANCELLED"],
+  OPEN: ["CLOSED", "CANCELLED"],
+  CLOSED: ["PROCESSED", "CANCELLED"],
+  PROCESSED: ["CANCELLED"],
+  CANCELLED: [],
+} as const satisfies Record<ActivityStatus, readonly ActivityStatus[]>;
+
+export function assertActivityTransition(from: ActivityStatus, to: ActivityStatus) {
+  if (ACTIVITY_TRANSITIONS[from].some((status) => status === to)) return;
+  throw new DomainError(
+    ErrorCodes.CONFLICT,
+    `No se puede cambiar una actividad de ${from} a ${to}.`,
+    409
+  );
+}
+
+function assertActivityMutable(status: ActivityStatus) {
+  if (status === "PROCESSED" || status === "CANCELLED") {
+    throw new DomainError(
+      ErrorCodes.CONFLICT,
+      "Las actividades procesadas o canceladas son de solo lectura.",
+      409
+    );
+  }
+}
+
+async function lockWritableSeason(tx: Tx, seasonId: string) {
+  const season = await lockSeasonRow(tx, seasonId);
+  assertSeasonWritable(season.status);
+  return season;
+}
 
 const activityFieldsSchema = z
   .object({
@@ -62,9 +99,24 @@ function withAttendanceCount<T extends { attendances: number }>(row: T) {
   return { ...row, _count: { attendances: row.attendances } };
 }
 
-function requireActivity<T>(row: T | null): T {
-  if (!row) {
+async function getWritableActivity(id: string) {
+  const activity = await db.orm.public.Activity.where({ id })
+    .include("season", (season) => season.select("status"))
+    .first();
+  if (!activity) {
     throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos esa actividad.", 404);
+  }
+  assertSeasonWritable(activity.season.status);
+  return activity;
+}
+
+function requireUnchangedActivity<T>(row: T | null): T {
+  if (!row) {
+    throw new DomainError(
+      ErrorCodes.CONFLICT,
+      "La actividad cambió mientras la estabas actualizando. Recarga e inténtalo de nuevo.",
+      409
+    );
   }
   return row;
 }
@@ -178,8 +230,6 @@ async function insertActivity(input: {
   if (!season) {
     throw new DomainError(ErrorCodes.NOT_FOUND, "No hay una temporada activa.", 404);
   }
-  assertSeasonWritable(season.status);
-
   const fields = parseActivityFields({
     name: input.name,
     individualPoints: input.individualPoints,
@@ -188,37 +238,41 @@ async function insertActivity(input: {
     registrationEnd: input.registrationEnd,
   });
 
-  const activity = await db.orm.public.Activity.create({
-    publicId: createPublicId(),
-    seasonId: season.id,
-    name: fields.name,
-    description: input.description?.trim() || null,
-    activityType: input.activityType ?? "GENERAL",
-    startsAt: toIso(fields.startsAt),
-    registrationStart: toIso(fields.registrationStart),
-    registrationEnd: toIso(fields.registrationEnd),
-    individualPoints: fields.individualPoints,
-    approvalMode: input.approvalMode ?? "AUTO",
-    status: input.status,
-    committeeId: input.committeeId ?? null,
-    needsApproval: input.needsApproval,
-    createdById: input.actor.id,
-  });
+  return db.transaction(async (tx) => {
+    await lockWritableSeason(tx, season.id);
+    const activity = await tx.orm.public.Activity.create({
+      publicId: createPublicId(),
+      seasonId: season.id,
+      name: fields.name,
+      description: input.description?.trim() || null,
+      activityType: input.activityType ?? "GENERAL",
+      startsAt: toIso(fields.startsAt),
+      registrationStart: toIso(fields.registrationStart),
+      registrationEnd: toIso(fields.registrationEnd),
+      individualPoints: fields.individualPoints,
+      approvalMode: input.approvalMode ?? "AUTO",
+      status: input.status,
+      committeeId: input.committeeId ?? null,
+      needsApproval: input.needsApproval,
+      createdById: input.actor.id,
+    });
 
-  await writeAuditLog({
-    actorId: input.actor.id,
-    action: input.needsApproval ? "ACTIVITY_PROPOSED" : "ACTIVITY_CREATED",
-    entityType: "Activity",
-    entityId: activity.id,
-    after: {
-      name: activity.name,
-      points: activity.individualPoints,
-      approvalMode: activity.approvalMode,
-      committeeId: activity.committeeId,
-    },
-    ip: input.ip,
+    await writeAuditLog(tx, {
+      actorId: input.actor.id,
+      action: input.needsApproval ? "ACTIVITY_PROPOSED" : "ACTIVITY_CREATED",
+      entityType: "Activity",
+      entityId: activity.id,
+      after: {
+        name: activity.name,
+        status: activity.status,
+        points: activity.individualPoints,
+        approvalMode: activity.approvalMode,
+        committeeId: activity.committeeId,
+      },
+      ip: input.ip,
+    });
+    return activity;
   });
-  return activity;
 }
 
 export async function updateActivity(input: {
@@ -231,17 +285,15 @@ export async function updateActivity(input: {
   registrationEnd?: Date;
   individualPoints?: number;
   approvalMode?: ApprovalMode;
-  status?: ActivityStatus;
   ip?: string | null;
 }) {
   requireAdmin(input.actor);
   const current = await db.orm.public.Activity.where({ id: input.activityId })
-    .include("season")
+    .include("season", (season) => season.select("status"))
     .first();
   if (!current) {
     throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos esa actividad.", 404);
   }
-
   const fields = parseActivityFields({
     name: input.name ?? current.name,
     individualPoints: input.individualPoints ?? current.individualPoints,
@@ -250,35 +302,67 @@ export async function updateActivity(input: {
     registrationEnd: input.registrationEnd ?? toDate(current.registrationEnd),
   });
 
-  const activity = requireActivity(
-    await db.orm.public.Activity.where({ id: input.activityId }).update({
-      name: fields.name,
-      description: input.description === undefined ? current.description : input.description,
-      startsAt: toIso(fields.startsAt),
-      registrationStart: toIso(fields.registrationStart),
-      registrationEnd: toIso(fields.registrationEnd),
-      individualPoints: fields.individualPoints,
-      approvalMode: input.approvalMode ?? current.approvalMode,
-      status: input.status ?? current.status,
-    })
-  );
+  assertActivityMutable(current.status);
+  if (
+    current.status !== "DRAFT" &&
+    (fields.individualPoints !== current.individualPoints ||
+      (input.approvalMode ?? current.approvalMode) !== current.approvalMode)
+  ) {
+    throw new DomainError(
+      ErrorCodes.CONFLICT,
+      "Los puntos y el modo de aprobación quedan fijos al publicar la actividad.",
+      409
+    );
+  }
+  if (
+    current.status === "CLOSED" &&
+    (fields.startsAt.getTime() !== toDate(current.startsAt).getTime() ||
+      fields.registrationStart.getTime() !== toDate(current.registrationStart).getTime() ||
+      fields.registrationEnd.getTime() !== toDate(current.registrationEnd).getTime())
+  ) {
+    throw new DomainError(
+      ErrorCodes.CONFLICT,
+      "Al cerrar la actividad solo se pueden corregir el nombre y la descripción.",
+      409
+    );
+  }
 
-  await writeAuditLog({
-    actorId: input.actor.id,
-    action: "ACTIVITY_UPDATED",
-    entityType: "Activity",
-    entityId: activity.id,
-    before: {
-      name: current.name,
-      status: current.status,
-      points: current.individualPoints,
-    },
-    after: {
-      name: activity.name,
-      status: activity.status,
-      points: activity.individualPoints,
-    },
-    ip: input.ip,
+  const activity = await db.transaction(async (tx) => {
+    await lockWritableSeason(tx, current.seasonId);
+    const locked = await lockActivityRow(tx, current.id);
+    if (locked.status !== current.status) {
+      throw new DomainError(ErrorCodes.CONFLICT, "La actividad cambió de estado.", 409);
+    }
+    const updated = requireUnchangedActivity(
+      await tx.orm.public.Activity.where({ id: locked.id, status: locked.status }).update({
+        name: fields.name,
+        description:
+          input.description === undefined ? locked.description : input.description?.trim() || null,
+        startsAt: toIso(fields.startsAt),
+        registrationStart: toIso(fields.registrationStart),
+        registrationEnd: toIso(fields.registrationEnd),
+        individualPoints: fields.individualPoints,
+        approvalMode: input.approvalMode ?? locked.approvalMode,
+      })
+    );
+    await writeAuditLog(tx, {
+      actorId: input.actor.id,
+      action: "ACTIVITY_UPDATED",
+      entityType: "Activity",
+      entityId: updated.id,
+      before: {
+        name: locked.name,
+        status: locked.status,
+        points: locked.individualPoints,
+      },
+      after: {
+        name: updated.name,
+        status: updated.status,
+        points: updated.individualPoints,
+      },
+      ip: input.ip,
+    });
+    return updated;
   });
 
   await recomputeActivityScores(activity.id);
@@ -291,32 +375,102 @@ export async function rotateActivityPublicId(input: {
   ip?: string | null;
 }) {
   requireAdmin(input.actor);
+  const current = await getWritableActivity(input.activityId);
+  const nextPublicId = createPublicId();
+  const activity = await db.transaction(async (tx) => {
+    await lockWritableSeason(tx, current.seasonId);
+    const locked = await lockActivityRow(tx, current.id);
+    assertActivityMutable(locked.status);
+    await tx.orm.public.ActivityPublicIdHistory.create({
+      activityId: locked.id,
+      publicId: locked.publicId,
+    });
+    const updated = requireUnchangedActivity(
+      await tx.orm.public.Activity.where({ id: locked.id, status: locked.status }).update({
+        publicId: nextPublicId,
+      })
+    );
+    await writeAuditLog(tx, {
+      actorId: input.actor.id,
+      action: "ACTIVITY_QR_ROTATED",
+      entityType: "Activity",
+      entityId: updated.id,
+      before: { publicId: locked.publicId },
+      after: { publicId: updated.publicId },
+      ip: input.ip,
+    });
+    return updated;
+  });
+  return activity;
+}
+
+type ActivityForwardStatus = Extract<ActivityStatus, "OPEN" | "CLOSED" | "PROCESSED">;
+
+async function transitionActivityInternal(input: {
+  actor: Actor;
+  activityId: string;
+  to: ActivityForwardStatus;
+  requireProposal?: boolean;
+  action?: string;
+  ip?: string | null;
+}) {
+  requireAdmin(input.actor);
   const current = await db.orm.public.Activity.first({ id: input.activityId });
   if (!current) {
     throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos esa actividad.", 404);
   }
-  const nextPublicId = createPublicId();
-  const activity = await db.transaction(async (tx) => {
-    await tx.orm.public.ActivityPublicIdHistory.create({
-      activityId: current.id,
-      publicId: current.publicId,
-    });
-    return requireActivity(
-      await tx.orm.public.Activity.where({ id: input.activityId }).update({
-        publicId: nextPublicId,
+
+  return db.transaction(async (tx) => {
+    await lockWritableSeason(tx, current.seasonId);
+    const locked = await lockActivityRow(tx, current.id);
+    if (input.requireProposal && !locked.needsApproval) {
+      throw new DomainError(
+        ErrorCodes.VALIDATION,
+        "Esa actividad no está en cola de aprobación.",
+        400
+      );
+    }
+    assertActivityTransition(locked.status, input.to);
+    if (input.to === "PROCESSED") {
+      const { total } = await tx.orm.public.Attendance.where({
+        activityId: locked.id,
+        status: "PENDING",
+      }).aggregate((aggregate) => ({ total: aggregate.count() }));
+      if (total > 0) {
+        throw new DomainError(
+          ErrorCodes.CONFLICT,
+          "Resuelve todas las asistencias pendientes antes de procesar la actividad.",
+          409
+        );
+      }
+    }
+
+    const activity = requireUnchangedActivity(
+      await tx.orm.public.Activity.where({ id: locked.id, status: locked.status }).update({
+        status: input.to,
+        needsApproval: input.to === "OPEN" ? false : locked.needsApproval,
       })
     );
+    await writeAuditLog(tx, {
+      actorId: input.actor.id,
+      action: input.action ?? `ACTIVITY_${input.to}`,
+      entityType: "Activity",
+      entityId: activity.id,
+      before: { status: locked.status, needsApproval: locked.needsApproval },
+      after: { status: activity.status, needsApproval: activity.needsApproval },
+      ip: input.ip,
+    });
+    return activity;
   });
-  await writeAuditLog({
-    actorId: input.actor.id,
-    action: "ACTIVITY_QR_ROTATED",
-    entityType: "Activity",
-    entityId: activity.id,
-    before: { publicId: current.publicId },
-    after: { publicId: activity.publicId },
-    ip: input.ip,
-  });
-  return activity;
+}
+
+export async function transitionActivity(input: {
+  actor: Actor;
+  activityId: string;
+  to: ActivityForwardStatus;
+  ip?: string | null;
+}) {
+  return transitionActivityInternal(input);
 }
 
 export async function publishProposedActivity(input: {
@@ -324,34 +478,135 @@ export async function publishProposedActivity(input: {
   activityId: string;
   ip?: string | null;
 }) {
+  return transitionActivityInternal({
+    ...input,
+    to: "OPEN",
+    requireProposal: true,
+    action: "ACTIVITY_PROPOSAL_APPROVED",
+  });
+}
+
+export async function cancelActivity(input: {
+  actor: Actor;
+  activityId: string;
+  reason: string;
+  action?: string;
+  expectedStatus?: ActivityStatus;
+  requireNeedsApproval?: boolean;
+  ip?: string | null;
+}) {
   requireAdmin(input.actor);
+  const reason = input.reason.trim();
+  if (!reason) {
+    throw new DomainError(ErrorCodes.REASON_REQUIRED, "Indica el motivo de cancelación.", 400);
+  }
   const current = await db.orm.public.Activity.first({ id: input.activityId });
   if (!current) {
     throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos esa actividad.", 404);
   }
-  if (!current.needsApproval || current.status !== "DRAFT") {
-    throw new DomainError(
-      ErrorCodes.VALIDATION,
-      "Esa actividad no está en cola de aprobación.",
-      400
+  // A cancellation retry is a read-only no-op, even if the season was closed
+  // after the original commit. The first cancellation already serialized the
+  // activity, attendance reversals and audit entries.
+  if (current.status === "CANCELLED") return current;
+
+  const result = await db.transaction(async (tx) => {
+    await lockWritableSeason(tx, current.seasonId);
+    const locked = await lockActivityRow(tx, current.id);
+    if (
+      (input.expectedStatus && locked.status !== input.expectedStatus) ||
+      (input.requireNeedsApproval && !locked.needsApproval)
+    ) {
+      throw new DomainError(
+        ErrorCodes.CONFLICT,
+        "La actividad cambió mientras se procesaba la decisión.",
+        409
+      );
+    }
+    if (locked.status === "CANCELLED") {
+      const memberIds: string[] = [];
+      return { activity: locked, changed: false, memberIds };
+    }
+    assertActivityTransition(locked.status, "CANCELLED");
+
+    const attendances = await tx.orm.public.Attendance.where({ activityId: locked.id })
+      .where((attendance) => attendance.status.in(["PENDING", "APPROVED"]))
+      .all();
+    const now = isoNow();
+    for (const attendance of attendances) {
+      const updated = await tx.orm.public.Attendance.where({
+        id: attendance.id,
+        status: attendance.status,
+      }).update({
+        status: "CANCELLED",
+        cancelledAt: now,
+        cancelReason: reason,
+      });
+      if (!updated) {
+        throw new DomainError(
+          ErrorCodes.CONFLICT,
+          "Una asistencia cambió mientras se cancelaba la actividad.",
+          409
+        );
+      }
+      if (attendance.status === "APPROVED") {
+        await syncAttendanceCredit(tx, {
+          attendanceId: attendance.id,
+          memberId: attendance.memberId,
+          activity: locked,
+          status: "CANCELLED",
+          createdById: input.actor.id,
+          reversalReason: `Cancelación de actividad: ${locked.name}. ${reason}`,
+        });
+      }
+      await writeAuditLog(tx, {
+        actorId: input.actor.id,
+        action: "ATTENDANCE_CANCELLED_BY_ACTIVITY",
+        entityType: "Attendance",
+        entityId: attendance.id,
+        before: { status: attendance.status },
+        after: { status: "CANCELLED", reason },
+        ip: input.ip,
+      });
+    }
+
+    const activity = requireUnchangedActivity(
+      await tx.orm.public.Activity.where({ id: locked.id, status: locked.status }).update({
+        status: "CANCELLED",
+        needsApproval: false,
+        cancelledAt: now,
+        cancelReason: reason,
+      })
     );
-  }
-  const activity = requireActivity(
-    await db.orm.public.Activity.where({ id: current.id }).update({
-      status: "OPEN",
-      needsApproval: false,
-    })
-  );
-  await writeAuditLog({
-    actorId: input.actor.id,
-    action: "ACTIVITY_PROPOSAL_APPROVED",
-    entityType: "Activity",
-    entityId: activity.id,
-    before: { status: current.status, needsApproval: current.needsApproval },
-    after: { status: activity.status, needsApproval: activity.needsApproval },
-    ip: input.ip,
+    await writeAuditLog(tx, {
+      actorId: input.actor.id,
+      action: input.action ?? "ACTIVITY_CANCELLED",
+      entityType: "Activity",
+      entityId: activity.id,
+      before: { status: locked.status, needsApproval: locked.needsApproval },
+      after: { status: activity.status, reason },
+      ip: input.ip,
+    });
+    return {
+      activity,
+      changed: true,
+      memberIds: [...new Set(attendances.map((attendance) => attendance.memberId))],
+    };
   });
-  return activity;
+
+  if (result.changed) {
+    if (result.memberIds.length === 0) {
+      await recomputeActivityScores(result.activity.id);
+    } else {
+      for (const memberId of result.memberIds) {
+        await runAttendanceEffects({
+          activityId: result.activity.id,
+          seasonId: result.activity.seasonId,
+          memberId,
+        });
+      }
+    }
+  }
+  return result.activity;
 }
 
 export async function rejectProposedActivity(input: {
@@ -359,34 +614,21 @@ export async function rejectProposedActivity(input: {
   activityId: string;
   ip?: string | null;
 }) {
-  requireAdmin(input.actor);
   const current = await db.orm.public.Activity.first({ id: input.activityId });
-  if (!current) {
-    throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos esa actividad.", 404);
-  }
-  if (!current.needsApproval || current.status !== "DRAFT") {
+  if (!current?.needsApproval || current.status !== "DRAFT") {
     throw new DomainError(
       ErrorCodes.VALIDATION,
       "Esa actividad no está en cola de aprobación.",
       400
     );
   }
-  const activity = requireActivity(
-    await db.orm.public.Activity.where({ id: current.id }).update({
-      status: "CANCELLED",
-      needsApproval: false,
-    })
-  );
-  await writeAuditLog({
-    actorId: input.actor.id,
+  return cancelActivity({
+    ...input,
+    reason: "Propuesta rechazada por GH General.",
     action: "ACTIVITY_PROPOSAL_REJECTED",
-    entityType: "Activity",
-    entityId: activity.id,
-    before: { status: current.status },
-    after: { status: activity.status },
-    ip: input.ip,
+    expectedStatus: "DRAFT",
+    requireNeedsApproval: true,
   });
-  return activity;
 }
 
 export async function listProposedActivities(seasonId?: string) {
@@ -419,24 +661,33 @@ export async function rotateAttendanceToken(input: {
   ip?: string | null;
 }) {
   requireAdmin(input.actor);
-  const current = await db.orm.public.Activity.first({ id: input.activityId });
-  if (!current) {
-    throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos esa actividad.", 404);
-  }
+  const current = await getWritableActivity(input.activityId);
   const token = generateAttendanceToken();
-  const activity = requireActivity(
-    await db.orm.public.Activity.where({ id: current.id }).update({
-      requireAttendanceToken: input.enable ?? true,
-      attendanceTokenHash: hashAttendanceToken(current.id, token),
-    })
-  );
-  await writeAuditLog({
-    actorId: input.actor.id,
-    action: "ACTIVITY_TOKEN_ROTATED",
-    entityType: "Activity",
-    entityId: activity.id,
-    after: { requireAttendanceToken: activity.requireAttendanceToken },
-    ip: input.ip,
+  const activity = await db.transaction(async (tx) => {
+    await lockWritableSeason(tx, current.seasonId);
+    const locked = await lockActivityRow(tx, current.id);
+    if (locked.status !== "DRAFT" && locked.status !== "OPEN") {
+      throw new DomainError(
+        ErrorCodes.CONFLICT,
+        "El token solo se puede configurar antes de cerrar la actividad.",
+        409
+      );
+    }
+    const updated = requireUnchangedActivity(
+      await tx.orm.public.Activity.where({ id: locked.id, status: locked.status }).update({
+        requireAttendanceToken: input.enable ?? true,
+        attendanceTokenHash: hashAttendanceToken(locked.id, token),
+      })
+    );
+    await writeAuditLog(tx, {
+      actorId: input.actor.id,
+      action: "ACTIVITY_TOKEN_ROTATED",
+      entityType: "Activity",
+      entityId: updated.id,
+      after: { requireAttendanceToken: updated.requireAttendanceToken },
+      ip: input.ip,
+    });
+    return updated;
   });
   return { activity, token };
 }
@@ -447,22 +698,31 @@ export async function disableAttendanceToken(input: {
   ip?: string | null;
 }) {
   requireAdmin(input.actor);
-  const current = await db.orm.public.Activity.first({ id: input.activityId });
-  if (!current) {
-    throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos esa actividad.", 404);
-  }
-  const activity = requireActivity(
-    await db.orm.public.Activity.where({ id: current.id }).update({
-      requireAttendanceToken: false,
-      attendanceTokenHash: null,
-    })
-  );
-  await writeAuditLog({
-    actorId: input.actor.id,
-    action: "ACTIVITY_TOKEN_DISABLED",
-    entityType: "Activity",
-    entityId: activity.id,
-    ip: input.ip,
+  const current = await getWritableActivity(input.activityId);
+  const activity = await db.transaction(async (tx) => {
+    await lockWritableSeason(tx, current.seasonId);
+    const locked = await lockActivityRow(tx, current.id);
+    if (locked.status === "PROCESSED" || locked.status === "CANCELLED") {
+      throw new DomainError(
+        ErrorCodes.CONFLICT,
+        "Las actividades procesadas o canceladas son de solo lectura.",
+        409
+      );
+    }
+    const updated = requireUnchangedActivity(
+      await tx.orm.public.Activity.where({ id: locked.id, status: locked.status }).update({
+        requireAttendanceToken: false,
+        attendanceTokenHash: null,
+      })
+    );
+    await writeAuditLog(tx, {
+      actorId: input.actor.id,
+      action: "ACTIVITY_TOKEN_DISABLED",
+      entityType: "Activity",
+      entityId: updated.id,
+      ip: input.ip,
+    });
+    return updated;
   });
   return activity;
 }
@@ -521,15 +781,23 @@ export async function getPublishedActivityById(id: string) {
   return visible ? activity : null;
 }
 
-export async function getNextOpenActivity() {
-  return db.orm.public.Activity.where({ status: "OPEN" })
+export async function getNextOpenActivity(seasonId?: string) {
+  const resolvedSeasonId = seasonId ?? (await getActiveSeason())?.id;
+  if (!resolvedSeasonId) return null;
+  return db.orm.public.Activity.where({ seasonId: resolvedSeasonId, status: "OPEN" })
     .where((activity) => activity.startsAt.gte(isoNow()))
     .orderBy((activity) => activity.startsAt.asc())
     .first();
 }
 
-export async function getOpenActivities() {
-  return db.orm.public.Activity.where({ status: "OPEN" })
+export async function getOpenActivities(seasonId?: string) {
+  const resolvedSeasonId = seasonId ?? (await getActiveSeason())?.id;
+  if (!resolvedSeasonId) return [];
+  const now = isoNow();
+  return db.orm.public.Activity.where({ seasonId: resolvedSeasonId, status: "OPEN" })
+    .where((activity) =>
+      and(activity.registrationStart.lte(now), activity.registrationEnd.gte(now))
+    )
     .orderBy((activity) => activity.startsAt.asc())
     .all();
 }

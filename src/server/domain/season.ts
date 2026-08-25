@@ -13,6 +13,7 @@ import {
   persistHallOfFameSnapshot,
 } from "@/server/domain/hall-of-fame";
 import { refreshBadges } from "@/server/domain/badges";
+import { lockSeasonRow } from "@/server/domain/locks";
 
 export async function getActiveSeason() {
   return db.orm.public.Season.where({ status: "ACTIVE" }).first();
@@ -38,22 +39,41 @@ export async function createSeason(input: {
   ip?: string | null;
 }) {
   requireAdmin(input.actor);
+  const name = input.name.trim();
+  const start = input.startDate.getTime();
+  const end = input.endDate.getTime();
+  if (!name || Number.isNaN(start) || Number.isNaN(end) || start > end) {
+    throw new DomainError(
+      ErrorCodes.VALIDATION,
+      "Revisa el nombre y el rango de fechas de la temporada.",
+      400
+    );
+  }
+  if (input.status === "CLOSED") {
+    throw new DomainError(
+      ErrorCodes.VALIDATION,
+      "Crea la temporada como próxima o en curso y ciérrala después para congelar su foto.",
+      400
+    );
+  }
   try {
-    const season = await db.orm.public.Season.create({
-      name: input.name.trim(),
-      startDate: toDateOnly(input.startDate),
-      endDate: toDateOnly(input.endDate),
-      status: input.status ?? "UPCOMING",
+    return await db.transaction(async (tx) => {
+      const season = await tx.orm.public.Season.create({
+        name,
+        startDate: toDateOnly(input.startDate),
+        endDate: toDateOnly(input.endDate),
+        status: input.status ?? "UPCOMING",
+      });
+      await writeAuditLog(tx, {
+        actorId: input.actor.id,
+        action: "SEASON_CREATED",
+        entityType: "Season",
+        entityId: season.id,
+        after: { name: season.name, status: season.status },
+        ip: input.ip,
+      });
+      return season;
     });
-    await writeAuditLog({
-      actorId: input.actor.id,
-      action: "SEASON_CREATED",
-      entityType: "Season",
-      entityId: season.id,
-      after: { name: season.name, status: season.status },
-      ip: input.ip,
-    });
-    return season;
   } catch (error) {
     if (isUniqueConstraint(error)) {
       throw new DomainError(
@@ -77,13 +97,32 @@ export async function updateSeasonStatus(input: {
   if (!current) {
     throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos esa temporada.", 404);
   }
+  if (current.status === input.status) return current;
+  if (current.status === "CLOSED") {
+    throw new DomainError(
+      ErrorCodes.SEASON_CLOSED,
+      "Una temporada cerrada no se puede reabrir porque su Hall of Fame ya quedó congelado.",
+      409
+    );
+  }
 
   try {
-    const snapshot =
-      input.status === "CLOSED" ? await buildHallOfFameSnapshot(current.id) : null;
-
     const season = await db.transaction(async (tx) => {
-      const updated = await tx.orm.public.Season.where({ id: input.seasonId }).update({
+      const locked = await lockSeasonRow(tx, input.seasonId);
+      if (locked.status === input.status) return locked;
+      if (locked.status === "CLOSED") {
+        throw new DomainError(
+          ErrorCodes.SEASON_CLOSED,
+          "Una temporada cerrada no se puede reabrir porque su Hall of Fame ya quedó congelado.",
+          409
+        );
+      }
+      const snapshot =
+        input.status === "CLOSED" ? await buildHallOfFameSnapshot(tx, locked.id) : null;
+      const updated = await tx.orm.public.Season.where({
+        id: input.seasonId,
+        status: locked.status,
+      }).update({
         status: input.status,
       });
       if (!updated) {
@@ -92,17 +131,16 @@ export async function updateSeasonStatus(input: {
       if (snapshot) {
         await persistHallOfFameSnapshot(tx, updated.id, snapshot);
       }
+      await writeAuditLog(tx, {
+        actorId: input.actor.id,
+        action: input.status === "CLOSED" ? "SEASON_CLOSED" : "SEASON_UPDATED",
+        entityType: "Season",
+        entityId: updated.id,
+        before: { status: locked.status },
+        after: { status: updated.status },
+        ip: input.ip,
+      });
       return updated;
-    });
-
-    await writeAuditLog({
-      actorId: input.actor.id,
-      action: input.status === "CLOSED" ? "SEASON_CLOSED" : "SEASON_UPDATED",
-      entityType: "Season",
-      entityId: season.id,
-      before: { status: current.status },
-      after: { status: season.status },
-      ip: input.ip,
     });
 
     if (input.status === "CLOSED") {

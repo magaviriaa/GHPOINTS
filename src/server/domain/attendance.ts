@@ -1,6 +1,6 @@
 import "server-only";
 
-import { and } from "@prisma/orm-postgres/orm-client";
+import { and, or } from "@prisma/orm-postgres/orm-client";
 import type {
   ActivityStatus,
   AttendanceSource,
@@ -22,9 +22,11 @@ import {
   scheduleAttendanceEffects,
 } from "@/server/domain/attendance-effects";
 import { writeAuditLog } from "@/server/domain/audit";
+import { assertSeasonWritable } from "@/server/domain/season";
 import type { Actor } from "@/server/domain/authorization";
 import { requireAdmin } from "@/server/domain/authorization";
 import { dispatchAppEvent } from "@/server/notify/events";
+import { lockActivityRow, lockSeasonRow } from "@/server/domain/locks";
 
 type AttendanceWithActivity = {
   id: string;
@@ -58,6 +60,17 @@ function assertRegistrationWindow(
       400
     );
   }
+}
+
+function assertActivityAcceptsAdminAttendance(status: ActivityStatus) {
+  if (status === "OPEN" || status === "CLOSED") return;
+  throw new DomainError(
+    status === "CANCELLED" ? ErrorCodes.ACTIVITY_CANCELLED : ErrorCodes.ACTIVITY_NOT_OPEN,
+    status === "CANCELLED"
+      ? "Esta actividad fue cancelada."
+      : "Solo se pueden gestionar asistencias mientras la actividad está abierta o cerrada.",
+    409
+  );
 }
 
 // oxlint-disable-next-line anti-slop/no-unknown-parameters -- unique-constraint catch seam
@@ -165,11 +178,16 @@ async function applyAttendanceStatus(
 ) {
   assertAttendanceTransition(input.attendance.status, input.to);
 
-  const updated = await tx.orm.public.Attendance.where({ id: input.attendance.id }).update(
-    attendanceStatusPatch(input.to, input.actorId, input.now, input.reason)
-  );
+  const updated = await tx.orm.public.Attendance.where({
+    id: input.attendance.id,
+    status: input.attendance.status,
+  }).update(attendanceStatusPatch(input.to, input.actorId, input.now, input.reason));
   if (!updated) {
-    throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos esa asistencia.", 404);
+    throw new DomainError(
+      ErrorCodes.CONFLICT,
+      "La asistencia cambió mientras la estabas actualizando. Recarga e inténtalo de nuevo.",
+      409
+    );
   }
 
   await syncAttendanceCredit(tx, {
@@ -254,53 +272,54 @@ export async function registerAttendance(input: {
   source: Extract<AttendanceSource, "QR" | "LINK">;
 }) {
   const activity = input.activityId
-    ? await db.orm.public.Activity.where({ id: input.activityId }).include("season").first()
-    : await db.orm.public.Activity.where({ publicId: input.publicId }).include("season").first();
+    ? await db.orm.public.Activity.where({ id: input.activityId })
+        .include("season", (season) => season.select("status"))
+        .first()
+    : await db.orm.public.Activity.where({ publicId: input.publicId })
+        .include("season", (season) => season.select("status"))
+        .first();
 
   if (!activity) {
     throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos esa actividad.", 404);
   }
-
-  if (activity.season.status === "CLOSED") {
-    throw new DomainError(
-      ErrorCodes.SEASON_CLOSED,
-      "Esta temporada ya está cerrada.",
-      400
-    );
-  }
-
-  if (activity.status === "CANCELLED") {
-    throw new DomainError(
-      ErrorCodes.ACTIVITY_CANCELLED,
-      "Esta actividad fue cancelada.",
-      400
-    );
-  }
-
-  if (activity.status !== "OPEN") {
-    throw new DomainError(
-      ErrorCodes.ACTIVITY_NOT_OPEN,
-      "El registro para esta actividad está cerrado.",
-      400
-    );
-  }
-
-  assertAttendanceToken(activity, input.token ?? null);
-
   const now = new Date();
-  assertRegistrationWindow(now, activity.registrationStart, activity.registrationEnd, false);
-
   const attendance = await db
-    .transaction((tx) =>
-      insertAttendanceWithCredit(tx, {
-        activity,
+    .transaction(async (tx) => {
+      const season = await lockSeasonRow(tx, activity.seasonId);
+      assertSeasonWritable(season.status);
+      const locked = await lockActivityRow(tx, activity.id);
+      if (input.publicId && locked.publicId !== input.publicId) {
+        throw new DomainError(
+          ErrorCodes.NOT_FOUND,
+          "Este enlace fue reemplazado. Abre el QR actualizado.",
+          404
+        );
+      }
+      if (locked.status === "CANCELLED") {
+        throw new DomainError(
+          ErrorCodes.ACTIVITY_CANCELLED,
+          "Esta actividad fue cancelada.",
+          400
+        );
+      }
+      if (locked.status !== "OPEN") {
+        throw new DomainError(
+          ErrorCodes.ACTIVITY_NOT_OPEN,
+          "El registro para esta actividad está cerrado.",
+          400
+        );
+      }
+      assertAttendanceToken(locked, input.token ?? null);
+      assertRegistrationWindow(now, locked.registrationStart, locked.registrationEnd, false);
+      return insertAttendanceWithCredit(tx, {
+        activity: locked,
         memberId: input.actor.id,
         actorId: input.actor.id,
         source: input.source,
         now,
-        autoApprove: activity.approvalMode === "AUTO",
-      })
-    )
+        autoApprove: locked.approvalMode === "AUTO",
+      });
+    })
     .catch((error) => rethrowDuplicateAttendance(error, "Ya registraste tu asistencia."));
 
   scheduleAttendanceEffects({
@@ -329,12 +348,11 @@ export async function adminRegisterAttendance(input: {
   requireAdmin(input.actor);
 
   const activity = await db.orm.public.Activity.where({ id: input.activityId })
-    .include("season")
+    .include("season", (season) => season.select("status"))
     .first();
   if (!activity) {
     throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos esa actividad.", 404);
   }
-
   const member = await db.orm.public.Member.first({ id: input.memberId });
   if (!member) {
     throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos ese integrante.", 404);
@@ -343,28 +361,32 @@ export async function adminRegisterAttendance(input: {
   const now = new Date();
 
   const attendance = await db
-    .transaction((tx) =>
-      insertAttendanceWithCredit(tx, {
-        activity,
+    .transaction(async (tx) => {
+      const season = await lockSeasonRow(tx, activity.seasonId);
+      assertSeasonWritable(season.status);
+      const locked = await lockActivityRow(tx, activity.id);
+      assertActivityAcceptsAdminAttendance(locked.status);
+      const created = await insertAttendanceWithCredit(tx, {
+        activity: locked,
         memberId: member.id,
         actorId: input.actor.id,
         source: input.source ?? "ADMIN",
         now,
-        autoApprove: activity.approvalMode === "AUTO",
-      })
-    )
+        autoApprove: locked.approvalMode === "AUTO",
+      });
+      await writeAuditLog(tx, {
+        actorId: input.actor.id,
+        action: "ATTENDANCE_CREATED",
+        entityType: "Attendance",
+        entityId: created.id,
+        after: { memberId: member.id, activityId: locked.id, source: created.source },
+        ip: input.ip,
+      });
+      return created;
+    })
     .catch((error) =>
       rethrowDuplicateAttendance(error, "Ese integrante ya tiene asistencia en esta actividad.")
     );
-
-  await writeAuditLog({
-    actorId: input.actor.id,
-    action: "ATTENDANCE_CREATED",
-    entityType: "Attendance",
-    entityId: attendance.id,
-    after: { memberId: member.id, activityId: activity.id, source: attendance.source },
-    ip: input.ip,
-  });
   await runAttendanceEffects({
     activityId: activity.id,
     seasonId: activity.seasonId,
@@ -444,26 +466,63 @@ export async function decideAttendance(input: {
     throw new DomainError(ErrorCodes.REASON_REQUIRED, "Indica un motivo para anular.", 400);
   }
 
-  const attendances = await db.orm.public.Attendance.where((row) => row.id.in(uniqueIds))
+  const discovered = await db.orm.public.Attendance.where((row) => row.id.in(uniqueIds))
     .include("activity", (activity) =>
-      activity.select("id", "seasonId", "name", "individualPoints")
+      activity
+        .select("id", "seasonId", "name", "individualPoints")
+        .include("season", (season) => season.select("status"))
     )
     .all();
-  const byId = new Map(attendances.map((row) => [row.id, row]));
-  const ordered = uniqueIds.map((attendanceId) => {
-    const attendance = byId.get(attendanceId);
+  const discoveredById = new Map(discovered.map((row) => [row.id, row]));
+  for (const attendanceId of uniqueIds) {
+    const attendance = discoveredById.get(attendanceId);
     if (!attendance) {
       throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos esa asistencia.", 404);
     }
-    assertAttendanceTransition(attendance.status, input.to);
-    return attendance;
-  });
+  }
 
   const now = new Date();
-  const results = await db.transaction(async (tx) => {
-    const updated = [];
+  const { results, ordered } = await db.transaction(async (tx) => {
+    const seasonIds = [...new Set(discovered.map((row) => row.activity.seasonId))].sort();
+    for (const seasonId of seasonIds) {
+      const season = await lockSeasonRow(tx, seasonId);
+      assertSeasonWritable(season.status);
+    }
+    const activityIds = [...new Set(discovered.map((row) => row.activity.id))].sort();
+    for (const activityId of activityIds) {
+      const activity = await lockActivityRow(tx, activityId);
+      if (input.to === "CANCELLED") {
+        if (
+          activity.status !== "OPEN" &&
+          activity.status !== "CLOSED" &&
+          activity.status !== "PROCESSED"
+        ) {
+          assertActivityAcceptsAdminAttendance(activity.status);
+        }
+      } else {
+        assertActivityAcceptsAdminAttendance(activity.status);
+      }
+    }
+
+    const currentRows = await tx.orm.public.Attendance.where((row) => row.id.in(uniqueIds))
+      .include("activity", (activity) =>
+        activity.select("id", "seasonId", "name", "individualPoints")
+      )
+      .all();
+    const currentById = new Map(currentRows.map((row) => [row.id, row]));
+    const ordered = uniqueIds.map((attendanceId) => {
+      const attendance = currentById.get(attendanceId);
+      if (!attendance) {
+        throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos esa asistencia.", 404);
+      }
+      assertAttendanceTransition(attendance.status, input.to);
+      return attendance;
+    });
+
+    const updatedRows = [];
+    const action = auditActionFor(input.to);
     for (const attendance of ordered) {
-      updated.push(
+      updatedRows.push(
         await applyAttendanceStatus(tx, {
           attendance,
           to: input.to,
@@ -472,22 +531,18 @@ export async function decideAttendance(input: {
           reason: reason.length > 0 ? reason : undefined,
         })
       );
+      await writeAuditLog(tx, {
+        actorId: input.actor.id,
+        action,
+        entityType: "Attendance",
+        entityId: attendance.id,
+        before: { status: attendance.status },
+        after: reason.length > 0 ? { status: input.to, reason } : { status: input.to },
+        ip: input.ip,
+      });
     }
-    return updated;
+    return { results: updatedRows, ordered };
   });
-
-  const action = auditActionFor(input.to);
-  for (const attendance of ordered) {
-    await writeAuditLog({
-      actorId: input.actor.id,
-      action,
-      entityType: "Attendance",
-      entityId: attendance.id,
-      before: { status: attendance.status },
-      after: reason.length > 0 ? { status: input.to, reason } : { status: input.to },
-      ip: input.ip,
-    });
-  }
 
   await runEffectsForAttendances(ordered);
   if (input.to === "APPROVED") {
@@ -508,7 +563,10 @@ export async function listActivityAttendances(
   if (filters?.query || filters?.committeeId) {
     let members = db.orm.public.Member.select("id");
     if (filters.query) {
-      members = members.where((member) => member.fullName.ilike(`%${filters.query}%`));
+      const pattern = `%${filters.query.trim()}%`;
+      members = members.where((member) =>
+        or(member.fullName.ilike(pattern), member.institutionalEmail.ilike(pattern))
+      );
     }
     if (filters.committeeId) {
       const committeeId = filters.committeeId;
@@ -526,7 +584,7 @@ export async function listActivityAttendances(
   let collection = db.orm.public.Attendance.where({ activityId })
     .include("member", (member) =>
       member
-        .select("id", "fullName")
+        .select("id", "fullName", "institutionalEmail")
         .include("committees", (committees) =>
           committees
             .where({ isActive: true })
@@ -569,18 +627,52 @@ export async function countApprovedAttendances(activityId: string) {
   return total;
 }
 
-export async function listPendingAttendances(seasonId?: string) {
+export async function listPendingAttendances(filters?: {
+  seasonId?: string;
+  query?: string;
+  committeeId?: string;
+  activityId?: string;
+}) {
+  let memberIds: string[] | undefined;
+  if (filters?.query || filters?.committeeId) {
+    let members = db.orm.public.Member.select("id");
+    if (filters.query) {
+      const pattern = `%${filters.query.trim()}%`;
+      members = members.where((member) =>
+        or(member.fullName.ilike(pattern), member.institutionalEmail.ilike(pattern))
+      );
+    }
+    if (filters.committeeId) {
+      const committeeId = filters.committeeId;
+      members = members.where((member) =>
+        member.committees.some((membership) =>
+          and(membership.committeeId.eq(committeeId), membership.isActive.eq(true))
+        )
+      );
+    }
+    memberIds = (await members.all()).map((member) => member.id);
+    if (memberIds.length === 0) return [];
+  }
+
   let collection = db.orm.public.Attendance.where({ status: "PENDING" })
     .select("id", "registeredAt", "source", "activityId", "memberId")
-    .include("member", (member) => member.select("id", "fullName"))
+    .include("member", (member) => member.select("id", "fullName", "institutionalEmail"))
     .include("activity", (activity) => activity.select("id", "name"))
     .orderBy((row) => row.registeredAt.desc());
 
-  if (seasonId) {
-    const activities = await db.orm.public.Activity.where({ seasonId }).select("id").all();
+  if (filters?.seasonId) {
+    const activities = await db.orm.public.Activity.where({ seasonId: filters.seasonId })
+      .select("id")
+      .all();
     const activityIds = activities.map((activity) => activity.id);
     if (activityIds.length === 0) return [];
     collection = collection.where((row) => row.activityId.in(activityIds));
+  }
+  if (filters?.activityId) {
+    collection = collection.where({ activityId: filters.activityId });
+  }
+  if (memberIds) {
+    collection = collection.where((row) => row.memberId.in(memberIds));
   }
 
   return collection.all();

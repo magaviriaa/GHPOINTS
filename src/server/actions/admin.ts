@@ -6,12 +6,14 @@ import { clientIp } from "@/server/auth/identity";
 import { fromLocalInput } from "@/lib/dates";
 import { adminRegisterAttendance, decideAttendance } from "@/server/domain/attendance";
 import {
+  cancelActivity,
   createActivity,
   disableAttendanceToken,
   publishProposedActivity,
   rejectProposedActivity,
   rotateActivityPublicId,
   rotateAttendanceToken,
+  transitionActivity,
   updateActivity,
 } from "@/server/domain/activities";
 import { createCommittee, updateCommittee } from "@/server/domain/committees";
@@ -22,11 +24,12 @@ import {
   updateMember,
 } from "@/server/domain/members";
 import { assignManualPoints, bulkAwardActivity, reversePoints } from "@/server/domain/admin-points";
-import { createSeason, updateSeasonStatus } from "@/server/domain/season";
+import { createSeason, getActiveSeason, updateSeasonStatus } from "@/server/domain/season";
+import { recomputeSeasonScores } from "@/server/domain/scoring";
 import { setConfigValue } from "@/server/config/app-config";
 import {
   commitMemberImport,
-  consumeMemberImportPreview,
+  commitFormsImport,
   loadMemberImportPreview,
   loadFormsImportPreview,
   parseTabular,
@@ -34,7 +37,6 @@ import {
   previewMemberImport,
   saveFormsImportPreview,
   saveMemberImportPreview,
-  importFormsAttendances,
 } from "@/server/domain/import";
 import { DomainError, ErrorCodes, toUserMessage } from "@/server/domain/errors";
 import { requireAdmin, type Actor } from "@/server/domain/authorization";
@@ -170,10 +172,7 @@ export async function adminCreateActivityAction(formData: FormData): Promise<Res
       registrationEnd: fromLocalInput(str(data, "registrationEnd")),
       individualPoints: num(data, "individualPoints"),
       approvalMode: parseEnum(str(data, "approvalMode") || "AUTO", ["AUTO", "MANUAL"] as const),
-      status: parseEnum(
-        str(data, "status") || "OPEN",
-        ["DRAFT", "OPEN", "CLOSED", "PROCESSED", "CANCELLED"] as const
-      ),
+      status: parseEnum(str(data, "status") || "OPEN", ["DRAFT", "OPEN"] as const),
       ip,
     });
   });
@@ -185,18 +184,50 @@ export async function adminUpdateActivityAction(formData: FormData): Promise<Res
       actor,
       activityId: str(data, "activityId"),
       name: str(data, "name"),
+      description: str(data, "description"),
       startsAt: fromLocalInput(str(data, "startsAt")),
       registrationStart: fromLocalInput(str(data, "registrationStart")),
       registrationEnd: fromLocalInput(str(data, "registrationEnd")),
       individualPoints: num(data, "individualPoints"),
       approvalMode: parseEnum(str(data, "approvalMode") || "AUTO", ["AUTO", "MANUAL"] as const),
-      status: parseEnum(
-        str(data, "status") || "OPEN",
-        ["DRAFT", "OPEN", "CLOSED", "PROCESSED", "CANCELLED"] as const
-      ),
       ip,
     });
   });
+}
+
+export async function adminTransitionActivityAction(formData: FormData): Promise<Result> {
+  const activityId = str(formData, "activityId");
+  return runAdminAction(
+    formData,
+    ["/admin/activities", `/admin/activities/${activityId}`, "/admin/attendance"],
+    async ({ actor, ip }, data) => {
+      const activity = await transitionActivity({
+        actor,
+        activityId,
+        to: parseEnum(str(data, "to"), ["OPEN", "CLOSED", "PROCESSED"] as const),
+        ip,
+      });
+      if (activity.status === "OPEN") {
+        dispatchAppEvent({ type: "ACTIVITY_OPENED", activityName: activity.name });
+      }
+    }
+  );
+}
+
+export async function adminCancelActivityAction(formData: FormData): Promise<Result> {
+  const activityId = str(formData, "activityId");
+  return runAdminAction(
+    formData,
+    ["/admin/activities", `/admin/activities/${activityId}`, "/admin/attendance"],
+    async ({ actor, ip }, data) => {
+      await cancelActivity({
+        actor,
+        activityId,
+        reason: str(data, "reason"),
+        ip,
+      });
+    }
+  );
 }
 
 export async function adminRotateQrAction(formData: FormData): Promise<Result> {
@@ -225,7 +256,7 @@ export async function adminApproveAttendanceAction(formData: FormData): Promise<
 }
 
 export async function adminBulkApproveAction(formData: FormData): Promise<Result> {
-  return runAdminAction(formData, ["/admin/activities"], async ({ actor, ip }, data) => {
+  return runAdminAction(formData, ["/admin/activities", "/admin/attendance"], async ({ actor, ip }, data) => {
     await decideAttendance({
       actor,
       attendanceIds: strs(data, "attendanceIds"),
@@ -236,7 +267,7 @@ export async function adminBulkApproveAction(formData: FormData): Promise<Result
 }
 
 export async function adminRejectAttendanceAction(formData: FormData): Promise<Result> {
-  return runAdminAction(formData, ["/admin/activities"], async ({ actor, ip }, data) => {
+  return runAdminAction(formData, ["/admin/activities", "/admin/attendance"], async ({ actor, ip }, data) => {
     await decideAttendance({
       actor,
       attendanceIds: [str(data, "attendanceId")],
@@ -308,15 +339,20 @@ export async function adminBulkAwardAction(formData: FormData): Promise<Result> 
 }
 
 export async function adminSaveConfigAction(formData: FormData): Promise<Result> {
-  return runAdminAction(formData, ["/admin/settings"], async ({ actor }, data) => {
-    await setConfigValue(
-      "committee_credit_strategy",
-      parseEnum(
+  return runAdminAction(formData, ["/admin/settings"], async ({ actor, ip }, data) => {
+    await setConfigValue({
+      key: "committee_credit_strategy",
+      value: parseEnum(
         str(data, "committee_credit_strategy") || "FULL_CREDIT",
         ["FULL_CREDIT", "FRACTIONAL_CREDIT"] as const
       ),
-      actor.id
-    );
+      updatedById: actor.id,
+      ip,
+    });
+    const season = await getActiveSeason();
+    if (season) {
+      await recomputeSeasonScores(season.id);
+    }
   });
 }
 
@@ -353,11 +389,11 @@ export async function adminCommitImportAction(formData: FormData): Promise<Resul
     const loaded = await loadMemberImportPreview({ actor, previewId: str(data, "previewId") });
     await commitMemberImport({
       actor,
+      previewId: loaded.previewId,
       filename: loaded.filename,
       preview: loaded.preview,
       ip,
     });
-    await consumeMemberImportPreview(loaded.previewId);
   });
 }
 
@@ -452,7 +488,7 @@ export async function adminPreviewFormsImportAction(formData: FormData) {
 }
 
 export async function adminCommitFormsImportAction(formData: FormData): Promise<Result> {
-  return runAdminAction(formData, ["/admin/attendance", "/admin/imports"], async ({ actor }, data) => {
+  return runAdminAction(formData, ["/admin/attendance", "/admin/imports"], async ({ actor, ip }, data) => {
     const loaded = await loadFormsImportPreview({ actor, previewId: str(data, "previewId") });
     if (loaded.preview.errors.length > 0) {
       throw new DomainError(
@@ -461,11 +497,12 @@ export async function adminCommitFormsImportAction(formData: FormData): Promise<
         400
       );
     }
-    await importFormsAttendances({
+    await commitFormsImport({
       actor,
+      previewId: loaded.previewId,
+      filename: loaded.filename,
       rows: loaded.preview.valid,
-      source: "MICROSOFT_FORMS",
+      ip,
     });
-    await consumeMemberImportPreview(loaded.previewId);
   });
 }

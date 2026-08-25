@@ -10,6 +10,20 @@ import { writeAuditLog } from "@/server/domain/audit";
 import type { Actor } from "@/server/domain/authorization";
 import { requireAdmin } from "@/server/domain/authorization";
 
+const COMMITTEE_COLOR = /^#[0-9a-f]{6}$/i;
+
+function committeeFields(name: string, color: string) {
+  const normalizedName = name.trim();
+  const slug = slugify(normalizedName);
+  if (!normalizedName || !slug) {
+    throw new DomainError(ErrorCodes.VALIDATION, "El nombre del comité es obligatorio.", 400);
+  }
+  if (!COMMITTEE_COLOR.test(color)) {
+    throw new DomainError(ErrorCodes.VALIDATION, "El color del comité no es válido.", 400);
+  }
+  return { name: normalizedName, slug, color };
+}
+
 export async function listCommittees() {
   const rows = await db.orm.public.Committee.include("memberships", (memberships) =>
     memberships.where({ isActive: true }).count()
@@ -62,21 +76,23 @@ export async function createCommittee(input: {
   ip?: string | null;
 }) {
   requireAdmin(input.actor);
-  const name = input.name.trim();
-  const committee = await db.orm.public.Committee.create({
-    name,
-    slug: slugify(name),
-    color: input.color || "#1e3a5f",
+  const fields = committeeFields(input.name, input.color || "#1e3a5f");
+  return db.transaction(async (tx) => {
+    const committee = await tx.orm.public.Committee.create({
+      name: fields.name,
+      slug: fields.slug,
+      color: fields.color,
+    });
+    await writeAuditLog(tx, {
+      actorId: input.actor.id,
+      action: "COMMITTEE_CREATED",
+      entityType: "Committee",
+      entityId: committee.id,
+      after: { name: committee.name, slug: committee.slug },
+      ip: input.ip,
+    });
+    return committee;
   });
-  await writeAuditLog({
-    actorId: input.actor.id,
-    action: "COMMITTEE_CREATED",
-    entityType: "Committee",
-    entityId: committee.id,
-    after: { name: committee.name, slug: committee.slug },
-    ip: input.ip,
-  });
-  return committee;
 }
 
 export async function updateCommittee(input: {
@@ -93,24 +109,30 @@ export async function updateCommittee(input: {
     throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos ese comité.", 404);
   }
 
-  const committee = await db.orm.public.Committee.where({ id: input.committeeId }).update({
-    name: input.name?.trim() ?? current.name,
-    slug: input.name ? slugify(input.name) : current.slug,
-    color: input.color ?? current.color,
-    status: input.status ?? current.status,
-  });
-  if (!committee) {
-    throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos ese comité.", 404);
-  }
+  const fields = committeeFields(
+    input.name === undefined ? current.name : input.name,
+    input.color === undefined ? current.color : input.color
+  );
 
-  await writeAuditLog({
-    actorId: input.actor.id,
-    action: "COMMITTEE_UPDATED",
-    entityType: "Committee",
-    entityId: committee.id,
-    before: { name: current.name, status: current.status },
-    after: { name: committee.name, status: committee.status },
-    ip: input.ip,
+  return db.transaction(async (tx) => {
+    const committee = await tx.orm.public.Committee.where({ id: input.committeeId }).update({
+      name: fields.name,
+      slug: fields.slug,
+      color: fields.color,
+      status: input.status ?? current.status,
+    });
+    if (!committee) {
+      throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos ese comité.", 404);
+    }
+    await writeAuditLog(tx, {
+      actorId: input.actor.id,
+      action: "COMMITTEE_UPDATED",
+      entityType: "Committee",
+      entityId: committee.id,
+      before: { name: current.name, status: current.status },
+      after: { name: committee.name, status: committee.status },
+      ip: input.ip,
+    });
+    return committee;
   });
-  return committee;
 }

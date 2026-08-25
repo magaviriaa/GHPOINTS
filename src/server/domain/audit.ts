@@ -1,7 +1,7 @@
 import "server-only";
 
 import { or } from "@prisma/orm-postgres/orm-client";
-import { db } from "@/server/db/prisma";
+import { db, type Tx } from "@/server/db/prisma";
 import type { JsonValue } from "@/server/db/types";
 
 type WriteAuditInput = {
@@ -14,8 +14,8 @@ type WriteAuditInput = {
   ip?: string | null;
 };
 
-export async function writeAuditLog(input: WriteAuditInput) {
-  await db.orm.public.AuditLog.create({
+export async function writeAuditLog(tx: Tx, input: WriteAuditInput) {
+  await tx.orm.public.AuditLog.create({
     actorId: input.actorId ?? null,
     action: input.action,
     entityType: input.entityType,

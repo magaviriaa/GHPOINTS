@@ -1,18 +1,18 @@
 import "server-only";
 
 import { z } from "zod";
+import { and } from "@prisma/orm-postgres/orm-client";
 import { db, type Tx } from "@/server/db/prisma";
-import { toDate } from "@/server/db/time";
-import type { JsonValue } from "@/server/db/types";
-import { getCommitteeRanking, getIndividualRanking } from "@/server/domain/ranking";
+import { fromDecimal, toDate } from "@/server/db/time";
+import type { JsonValue, MemberType } from "@/server/db/types";
 import {
-  committeeFromRanking,
-  personFromRanking,
   type HallOfFameCommittee,
   type HallOfFamePerson,
   type HallOfFameSnapshot,
   type HallOfFameStats,
 } from "@/server/domain/hall-of-fame-pure";
+import { withCompetitionRanks } from "@/server/domain/ranking-pure";
+import { averageRate } from "@/server/domain/scoring-pure";
 
 const personSchema = z.object({
   fullName: z.string(),
@@ -58,17 +58,63 @@ function parseStats(value: JsonValue): HallOfFameStats {
   return parsed.success ? parsed.data : emptyStats;
 }
 
-export async function buildHallOfFameSnapshot(seasonId: string): Promise<HallOfFameSnapshot> {
-  const [active, newer, committees, stats] = await Promise.all([
-    getIndividualRanking({ board: "ACTIVE", seasonId, period: "season" }),
-    getIndividualRanking({ board: "NEW", seasonId, period: "season" }),
-    getCommitteeRanking(seasonId),
-    collectSeasonStats(seasonId),
-  ]);
+async function buildPeopleBoard(tx: Tx, seasonId: string, board: MemberType) {
+  const grouped = await tx.orm.public.PointTransaction.where({ seasonId }).where((row) =>
+    row.member.some((member) => and(member.status.eq("ACTIVE"), member.memberType.eq(board)))
+  ).groupBy("memberId").aggregate((aggregate) => ({ total: aggregate.sum("points") }));
+  if (grouped.length === 0) return [];
+  const members = await tx.orm.public.Member.where((member) =>
+    member.id.in(grouped.map((row) => row.memberId))
+  )
+    .where({ status: "ACTIVE", memberType: board })
+    .select("id", "fullName")
+    .all();
+  const memberById = new Map(members.map((member) => [member.id, member]));
+  return withCompetitionRanks(
+    grouped.flatMap((row) => {
+      const member = memberById.get(row.memberId);
+      return member ? [{ fullName: member.fullName, total: row.total ?? 0 }] : [];
+    }),
+    (left, right) => left.fullName.localeCompare(right.fullName, "es")
+  );
+}
 
-  const top3Active = active.entries.slice(0, 3).map(personFromRanking);
-  const top3New = newer.entries.slice(0, 3).map(personFromRanking);
-  const top3Committees = committees.entries.slice(0, 3).map(committeeFromRanking);
+async function buildCommitteeBoard(tx: Tx, seasonId: string) {
+  const scores = await tx.orm.public.CommitteeActivityScore.where({ seasonId })
+    .where((score) => score.activity.some((activity) => activity.status.in(["CLOSED", "PROCESSED"])))
+    .select("committeeId", "participationRate")
+    .all();
+  const rates = new Map<string, number[]>();
+  for (const score of scores) {
+    const values = rates.get(score.committeeId) ?? [];
+    values.push(fromDecimal(score.participationRate));
+    rates.set(score.committeeId, values);
+  }
+  const committees = await tx.orm.public.Committee.where({ status: "ACTIVE" })
+    .select("id", "name", "slug")
+    .all();
+  return withCompetitionRanks(
+    committees.map((committee) => ({
+      name: committee.name,
+      slug: committee.slug,
+      total: averageRate(rates.get(committee.id) ?? []),
+    })),
+    (left, right) => left.slug.localeCompare(right.slug)
+  );
+}
+
+export async function buildHallOfFameSnapshot(
+  tx: Tx,
+  seasonId: string
+): Promise<HallOfFameSnapshot> {
+  const active = await buildPeopleBoard(tx, seasonId, "ACTIVE");
+  const newer = await buildPeopleBoard(tx, seasonId, "NEW");
+  const committees = await buildCommitteeBoard(tx, seasonId);
+  const stats = await collectSeasonStats(tx, seasonId);
+
+  const top3Active = active.slice(0, 3);
+  const top3New = newer.slice(0, 3);
+  const top3Committees = committees.slice(0, 3);
 
   return {
     activeWinner: top3Active[0] ?? null,
@@ -81,26 +127,24 @@ export async function buildHallOfFameSnapshot(seasonId: string): Promise<HallOfF
   };
 }
 
-async function collectSeasonStats(seasonId: string): Promise<HallOfFameStats> {
-  const [activeMembers, newMembers, activities, attendances, points] = await Promise.all([
-    db.orm.public.Member.where({ status: "ACTIVE", memberType: "ACTIVE" }).aggregate((agg) => ({
-      total: agg.count(),
-    })),
-    db.orm.public.Member.where({ status: "ACTIVE", memberType: "NEW" }).aggregate((agg) => ({
-      total: agg.count(),
-    })),
-    db.orm.public.Activity.where({ seasonId })
-      .where((activity) => activity.status.in(["CLOSED", "PROCESSED", "OPEN"]))
-      .aggregate((agg) => ({ total: agg.count() })),
-    db.orm.public.Attendance.where({ status: "APPROVED" })
-      .where((attendance) =>
-        attendance.activity.some((activity) => activity.seasonId.eq(seasonId))
-      )
-      .aggregate((agg) => ({ total: agg.count() })),
-    db.orm.public.PointTransaction.where({ seasonId }).aggregate((agg) => ({
-      total: agg.sum("points"),
-    })),
-  ]);
+async function collectSeasonStats(tx: Tx, seasonId: string): Promise<HallOfFameStats> {
+  const activeMembers = await tx.orm.public.Member.where({
+    status: "ACTIVE",
+    memberType: "ACTIVE",
+  }).aggregate((agg) => ({ total: agg.count() }));
+  const newMembers = await tx.orm.public.Member.where({
+    status: "ACTIVE",
+    memberType: "NEW",
+  }).aggregate((agg) => ({ total: agg.count() }));
+  const activities = await tx.orm.public.Activity.where({ seasonId })
+    .where((activity) => activity.status.in(["CLOSED", "PROCESSED", "OPEN"]))
+    .aggregate((agg) => ({ total: agg.count() }));
+  const attendances = await tx.orm.public.Attendance.where({ status: "APPROVED" })
+    .where((attendance) => attendance.activity.some((activity) => activity.seasonId.eq(seasonId)))
+    .aggregate((agg) => ({ total: agg.count() }));
+  const points = await tx.orm.public.PointTransaction.where({ seasonId }).aggregate((agg) => ({
+    total: agg.sum("points"),
+  }));
   return {
     activeMembers: activeMembers.total,
     newMembers: newMembers.total,

@@ -5,7 +5,11 @@ import type { MemberStatus, MemberType } from "@/server/db/types";
 import { db } from "@/server/db/prisma";
 import { isoNow } from "@/server/db/time";
 import { getAllowedEmailDomains } from "@/server/config/env";
-import { isAllowedEmailDomain, normalizeEmail } from "@/server/auth/email";
+import {
+  isAllowedEmailDomain,
+  isValidEmailAddress,
+  normalizeEmail,
+} from "@/server/auth/email";
 import { DomainError, ErrorCodes } from "@/server/domain/errors";
 import { writeAuditLog } from "@/server/domain/audit";
 import { destroyMemberSessions } from "@/server/auth/session";
@@ -18,6 +22,20 @@ import {
   participatesInCompetition,
   shouldRevokeSessions,
 } from "@/server/domain/members-pure";
+
+async function assertActiveCommitteesExist(committeeIds: string[]): Promise<void> {
+  if (committeeIds.length === 0) return;
+  const { total } = await db.orm.public.Committee.where({ status: "ACTIVE" })
+    .where((committee) => committee.id.in(committeeIds))
+    .aggregate((aggregate) => ({ total: aggregate.count() }));
+  if (total !== committeeIds.length) {
+    throw new DomainError(
+      ErrorCodes.VALIDATION,
+      "Uno de los comités seleccionados no existe o está inactivo.",
+      400
+    );
+  }
+}
 
 export async function listMembers(filters: {
   query?: string;
@@ -123,8 +141,12 @@ export async function createMember(input: {
   ip?: string | null;
 }) {
   requireAdmin(input.actor);
+  const fullName = input.fullName.trim();
   const email = normalizeEmail(input.institutionalEmail);
-  if (!isAllowedEmailDomain(email, getAllowedEmailDomains())) {
+  if (!fullName) {
+    throw new DomainError(ErrorCodes.VALIDATION, "El nombre es obligatorio.", 400);
+  }
+  if (!isValidEmailAddress(email) || !isAllowedEmailDomain(email, getAllowedEmailDomains())) {
     throw new DomainError(
       ErrorCodes.INVALID_EMAIL_DOMAIN,
       "El correo debe ser institucional.",
@@ -133,25 +155,27 @@ export async function createMember(input: {
   }
 
   const committeeIds = assertCommitteeSelection(input.committeeIds, true);
+  await assertActiveCommitteesExist(committeeIds);
 
-  const member = await db.orm.public.Member.create({
-    fullName: input.fullName.trim(),
-    institutionalEmail: email,
-    memberType: input.memberType,
-    roles: (roles) => roles.create({ role: "MEMBER" }),
-    committees: (committees) =>
-      committees.create(committeeIds.map((committeeId) => ({ committeeId }))),
+  return db.transaction(async (tx) => {
+    const member = await tx.orm.public.Member.create({
+      fullName,
+      institutionalEmail: email,
+      memberType: input.memberType,
+      roles: (roles) => roles.create({ role: "MEMBER" }),
+      committees: (committees) =>
+        committees.create(committeeIds.map((committeeId) => ({ committeeId }))),
+    });
+    await writeAuditLog(tx, {
+      actorId: input.actor.id,
+      action: "MEMBER_CREATED",
+      entityType: "Member",
+      entityId: member.id,
+      after: { fullName: member.fullName, email, memberType: member.memberType },
+      ip: input.ip,
+    });
+    return member;
   });
-
-  await writeAuditLog({
-    actorId: input.actor.id,
-    action: "MEMBER_CREATED",
-    entityType: "Member",
-    entityId: member.id,
-    after: { fullName: member.fullName, email, memberType: member.memberType },
-    ip: input.ip,
-  });
-  return member;
 }
 
 export async function updateMember(input: {
@@ -172,7 +196,7 @@ export async function updateMember(input: {
   let email = current.institutionalEmail;
   if (input.institutionalEmail) {
     email = normalizeEmail(input.institutionalEmail);
-    if (!isAllowedEmailDomain(email, getAllowedEmailDomains())) {
+    if (!isValidEmailAddress(email) || !isAllowedEmailDomain(email, getAllowedEmailDomains())) {
       throw new DomainError(
         ErrorCodes.INVALID_EMAIL_DOMAIN,
         "El correo debe ser institucional.",
@@ -180,10 +204,14 @@ export async function updateMember(input: {
       );
     }
   }
+  const fullName = input.fullName?.trim();
+  if (input.fullName !== undefined && !fullName) {
+    throw new DomainError(ErrorCodes.VALIDATION, "El nombre es obligatorio.", 400);
+  }
 
   const member = await db.transaction(async (tx) => {
     const updated = await tx.orm.public.Member.where({ id: input.memberId }).update({
-      fullName: input.fullName?.trim() ?? current.fullName,
+      fullName: fullName ?? current.fullName,
       institutionalEmail: email,
       memberType: input.memberType ?? current.memberType,
       status: input.status ?? current.status,
@@ -198,7 +226,25 @@ export async function updateMember(input: {
         provider: "EMAIL_OTP",
       }).updateAll({ providerUserId: email });
     }
-
+    await writeAuditLog(tx, {
+      actorId: input.actor.id,
+      action: "MEMBER_UPDATED",
+      entityType: "Member",
+      entityId: updated.id,
+      before: {
+        fullName: current.fullName,
+        email: current.institutionalEmail,
+        memberType: current.memberType,
+        status: current.status,
+      },
+      after: {
+        fullName: updated.fullName,
+        email: updated.institutionalEmail,
+        memberType: updated.memberType,
+        status: updated.status,
+      },
+      ip: input.ip,
+    });
     return updated;
   });
 
@@ -206,25 +252,6 @@ export async function updateMember(input: {
     await destroyMemberSessions(member.id);
   }
 
-  await writeAuditLog({
-    actorId: input.actor.id,
-    action: "MEMBER_UPDATED",
-    entityType: "Member",
-    entityId: member.id,
-    before: {
-      fullName: current.fullName,
-      email: current.institutionalEmail,
-      memberType: current.memberType,
-      status: current.status,
-    },
-    after: {
-      fullName: member.fullName,
-      email: member.institutionalEmail,
-      memberType: member.memberType,
-      status: member.status,
-    },
-    ip: input.ip,
-  });
   return member;
 }
 
@@ -246,6 +273,7 @@ export async function setMemberCommittees(input: {
     input.committeeIds,
     participatesInCompetition(member.status)
   );
+  await assertActiveCommitteesExist(committeeIds);
   const desired = new Set(committeeIds);
   const now = isoNow();
 
@@ -271,16 +299,19 @@ export async function setMemberCommittees(input: {
         isActive: true,
       });
     }
-  });
-
-  await writeAuditLog({
-    actorId: input.actor.id,
-    action: "MEMBER_COMMITTEES_UPDATED",
-    entityType: "Member",
-    entityId: member.id,
-    before: { committeeIds: member.committees.filter((row) => row.isActive).map((row) => row.committeeId) },
-    after: { committeeIds },
-    ip: input.ip,
+    await writeAuditLog(tx, {
+      actorId: input.actor.id,
+      action: "MEMBER_COMMITTEES_UPDATED",
+      entityType: "Member",
+      entityId: member.id,
+      before: {
+        committeeIds: member.committees
+          .filter((row) => row.isActive)
+          .map((row) => row.committeeId),
+      },
+      after: { committeeIds },
+      ip: input.ip,
+    });
   });
 }
 
@@ -333,6 +364,9 @@ export async function setMemberRoles(input: {
     role.role === "COMMITTEE_LEADER" && role.committeeId ? [role.committeeId] : []
   );
   const nextLeaderIds: string[] = input.leaderCommitteeIds ?? currentLeaderIds;
+  if (input.leaderCommitteeIds !== undefined) {
+    await assertActiveCommitteesExist([...new Set(nextLeaderIds)]);
+  }
   const desiredLeaders = new Set(nextLeaderIds);
 
   await db.transaction(async (tx) => {
@@ -372,15 +406,14 @@ export async function setMemberRoles(input: {
         committeeId,
       });
     }
-  });
-
-  await writeAuditLog({
-    actorId: input.actor.id,
-    action: "MEMBER_ROLE_UPDATED",
-    entityType: "Member",
-    entityId: member.id,
-    after: { admin: nextAdmin, leaderCommitteeIds: nextLeaderIds },
-    ip: input.ip,
+    await writeAuditLog(tx, {
+      actorId: input.actor.id,
+      action: "MEMBER_ROLE_UPDATED",
+      entityType: "Member",
+      entityId: member.id,
+      after: { admin: nextAdmin, leaderCommitteeIds: nextLeaderIds },
+      ip: input.ip,
+    });
   });
 
   const season = await getActiveSeason();
