@@ -1,6 +1,8 @@
-import { Prisma } from "@prisma/client";
+const UNIQUE_VIOLATION = "23505";
 
-// oxlint-disable-next-line anti-slop/no-unknown-parameters -- Prisma catch-boundary
+// oxlint-disable-next-line anti-slop/no-unknown-parameters -- catch-boundary type guard
 export function isUniqueConstraint(error: unknown): boolean {
-  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
+  if (!(error instanceof Object)) return false;
+  if (!("sqlState" in error)) return false;
+  return error.sqlState === UNIQUE_VIOLATION;
 }

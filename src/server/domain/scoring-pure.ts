@@ -1,4 +1,6 @@
-import type { CommitteeCreditStrategy } from "@prisma/client";
+import type { CommitteeCreditStrategy } from "@/server/db/types";
+
+export const COMMITTEE_CREDIT_COUNTS = [1, 2, 3] as const;
 
 export function creditForMember(
   strategy: CommitteeCreditStrategy,
@@ -16,6 +18,32 @@ export function creditForMember(
       return _exhaustive;
     }
   }
+}
+
+export type CommitteeCreditShare = {
+  committeeCount: number;
+  creditPerCommittee: number;
+  totalCredit: number;
+};
+
+/** How one attendance credits committees. Individual GH Points are never split. */
+export function committeeCreditShare(
+  strategy: CommitteeCreditStrategy,
+  committeeCount: number
+): CommitteeCreditShare {
+  const creditPerCommittee = creditForMember(strategy, committeeCount);
+  return {
+    committeeCount,
+    creditPerCommittee,
+    totalCredit: creditPerCommittee * Math.max(committeeCount, 0),
+  };
+}
+
+export function formatCredit(value: number): string {
+  if (Math.abs(value - 1) < 1e-9) return "1";
+  if (Math.abs(value - 0.5) < 1e-9) return "0,5";
+  if (Math.abs(value - 1 / 3) < 1e-9) return "⅓";
+  return value.toLocaleString("es-CO", { maximumFractionDigits: 3 });
 }
 
 export function participationRate(credit: number, eligible: number): number {

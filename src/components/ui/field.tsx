@@ -62,22 +62,36 @@ export function CheckChip({
   name,
   value,
   defaultChecked,
+  checked,
+  disabled,
   color,
+  onChange,
   children,
 }: {
   name: string;
   value: string;
   defaultChecked?: boolean;
+  checked?: boolean;
+  disabled?: boolean;
   color?: string;
+  onChange?: (checked: boolean) => void;
   children: React.ReactNode;
 }) {
   return (
-    <label className="inline-flex cursor-pointer items-center gap-2 rounded-full border py-1.5 pr-3 pl-2.5 text-sm transition-colors select-none hover:bg-muted has-[:checked]:border-primary has-[:checked]:bg-primary/10 has-[:checked]:font-medium">
+    <label
+      className={cn(
+        "inline-flex cursor-pointer items-center gap-2 rounded-full border py-1.5 pr-3 pl-2.5 text-sm transition-colors select-none hover:bg-muted has-[:checked]:border-primary has-[:checked]:bg-primary/10 has-[:checked]:font-medium",
+        disabled && "cursor-not-allowed opacity-50 hover:bg-transparent"
+      )}
+    >
       <input
         type="checkbox"
         name={name}
         value={value}
-        defaultChecked={defaultChecked}
+        checked={checked}
+        defaultChecked={checked === undefined ? defaultChecked : undefined}
+        disabled={disabled}
+        onChange={onChange ? (event) => onChange(event.target.checked) : undefined}
         className="size-4 accent-[var(--primary)]"
       />
       {color ? (

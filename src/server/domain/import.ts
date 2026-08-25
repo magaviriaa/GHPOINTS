@@ -1,10 +1,12 @@
 import "server-only";
 
 import { z } from "zod";
-import type { AttendanceSource, MemberType, Prisma } from "@prisma/client";
+import { or } from "@prisma/orm-postgres/orm-client";
+import type { AttendanceSource, JsonValue, MemberType } from "@/server/db/types";
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
-import { prisma } from "@/server/db/prisma";
+import { db } from "@/server/db/prisma";
+import { isoNow, toIso } from "@/server/db/time";
 import { normalizeEmail, isAllowedEmailDomain } from "@/server/auth/email";
 import { getAllowedEmailDomains } from "@/server/config/env";
 import { DomainError, ErrorCodes } from "@/server/domain/errors";
@@ -13,6 +15,8 @@ import { isUniqueConstraint } from "@/server/db/errors";
 import { syncAttendanceCredit } from "@/server/domain/attendance-credit";
 import { recomputeActivityScores } from "@/server/domain/scoring";
 import { slugify } from "@/lib/text";
+import { MAX_MEMBER_COMMITTEES } from "@/lib/constants";
+import { uniqueCommitteeIds } from "@/server/domain/members-pure";
 import type { Actor } from "@/server/domain/authorization";
 import { requireAdmin } from "@/server/domain/authorization";
 
@@ -291,7 +295,7 @@ export async function previewMemberImport(
   rows: MemberSpreadsheetRow[]
 ): Promise<MemberImportPreview> {
   const domains = getAllowedEmailDomains();
-  const committees = await prisma.committee.findMany();
+  const committees = await db.orm.public.Committee.all();
   const bySlug = new Map(committees.map((committee) => [committee.slug, committee]));
   const byName = new Map(committees.map((committee) => [slugify(committee.name), committee]));
 
@@ -346,13 +350,63 @@ export async function previewMemberImport(
       committeeSlugs.push(committee.slug);
     }
 
-    valid.push({ row, fullName, email, memberType, committeeSlugs });
+    const uniqueSlugs = uniqueCommitteeIds(committeeSlugs);
+    if (uniqueSlugs.length > MAX_MEMBER_COMMITTEES) {
+      errors.push({
+        row,
+        level: "error",
+        message: `Como máximo ${MAX_MEMBER_COMMITTEES} comités a la vez (hay ${uniqueSlugs.length}).`,
+      });
+    }
+
+    valid.push({ row, fullName, email, memberType, committeeSlugs: uniqueSlugs });
   });
+
+  const emails = valid.map((row) => row.email);
+  const existingMembers =
+    emails.length === 0
+      ? []
+      : await db.orm.public.Member.where((member) => member.institutionalEmail.in(emails))
+          .include("committees", (committees) =>
+            committees
+              .where({ isActive: true })
+              .include("committee", (committee) => committee.select("slug"))
+          )
+          .select("institutionalEmail")
+          .all();
+  const activeSlugsByEmail = new Map(
+    existingMembers.map((member) => [
+      member.institutionalEmail,
+      member.committees.map((item) => item.committee.slug),
+    ])
+  );
+
+  for (const row of valid) {
+    const already = activeSlugsByEmail.get(row.email);
+    if (!already) {
+      if (row.committeeSlugs.length === 0) {
+        errors.push({
+          row: row.row,
+          level: "error",
+          message: `Un integrante nuevo debe entrar a 1, 2 o ${MAX_MEMBER_COMMITTEES} comités.`,
+        });
+      }
+      continue;
+    }
+    const combined = uniqueCommitteeIds([...already, ...row.committeeSlugs]);
+    if (combined.length > MAX_MEMBER_COMMITTEES) {
+      errors.push({
+        row: row.row,
+        level: "error",
+        message: `Quedaría en ${combined.length} comités. El tope es ${MAX_MEMBER_COMMITTEES}; cierra alguno antes de importar.`,
+      });
+    }
+  }
 
   return { valid, warnings, errors };
 }
 
-function parseMemberImportPreview(value: Prisma.JsonValue | null): MemberImportPreview | null {
+function parseMemberImportPreview(value: JsonValue | null): MemberImportPreview | null {
   const parsed = memberImportPreviewSchema.safeParse(value);
   return parsed.success ? parsed.data : null;
 }
@@ -363,17 +417,15 @@ export async function saveMemberImportPreview(input: {
   preview: MemberImportPreview;
 }) {
   requireAdmin(input.actor);
-  const job = await prisma.importJob.create({
-    data: {
-      type: "MEMBERS",
-      status: "PREVIEWED",
-      filename: input.filename,
-      createdById: input.actor.id,
-      summary: {
-        valid: input.preview.valid,
-        warnings: input.preview.warnings,
-        errors: input.preview.errors,
-      },
+  const job = await db.orm.public.ImportJob.create({
+    type: "MEMBERS",
+    status: "PREVIEWED",
+    filename: input.filename,
+    createdById: input.actor.id,
+    summary: {
+      valid: input.preview.valid,
+      warnings: input.preview.warnings,
+      errors: input.preview.errors,
     },
   });
   return job.id;
@@ -381,14 +433,12 @@ export async function saveMemberImportPreview(input: {
 
 export async function loadMemberImportPreview(input: { actor: Actor; previewId: string }) {
   requireAdmin(input.actor);
-  const job = await prisma.importJob.findFirst({
-    where: {
-      id: input.previewId,
-      createdById: input.actor.id,
-      type: "MEMBERS",
-      status: "PREVIEWED",
-    },
-  });
+  const job = await db.orm.public.ImportJob.where({
+    id: input.previewId,
+    createdById: input.actor.id,
+    type: "MEMBERS",
+    status: "PREVIEWED",
+  }).first();
   if (!job) {
     throw new DomainError(
       ErrorCodes.NOT_FOUND,
@@ -396,7 +446,8 @@ export async function loadMemberImportPreview(input: { actor: Actor; previewId: 
       404
     );
   }
-  const preview = parseMemberImportPreview(job.summary);
+  // SAFETY: ImportJob.summary is JSON written by saveMemberImportPreview.
+  const preview = parseMemberImportPreview(job.summary as JsonValue | null);
   if (!preview) {
     throw new DomainError(
       ErrorCodes.IMPORT_INVALID,
@@ -408,10 +459,7 @@ export async function loadMemberImportPreview(input: { actor: Actor; previewId: 
 }
 
 export async function consumeMemberImportPreview(previewId: string) {
-  await prisma.importJob.update({
-    where: { id: previewId },
-    data: { status: "CONSUMED" },
-  });
+  await db.orm.public.ImportJob.where({ id: previewId }).update({ status: "CONSUMED" });
 }
 
 export async function commitMemberImport(input: {
@@ -429,31 +477,28 @@ export async function commitMemberImport(input: {
     );
   }
 
-  const committees = await prisma.committee.findMany();
+  const committees = await db.orm.public.Committee.all();
   const bySlug = new Map(committees.map((committee) => [committee.slug, committee]));
 
-  await prisma.$transaction(async (tx) => {
+  await db.transaction(async (tx) => {
     for (const row of input.preview.valid) {
-      const existing = await tx.member.findUnique({
-        where: { institutionalEmail: row.email },
-        include: { committees: true },
-      });
+      const existing = await tx.orm.public.Member.where({ institutionalEmail: row.email })
+        .include("committees")
+        .first();
 
       const member =
         existing ??
-        (await tx.member.create({
-          data: {
-            fullName: row.fullName,
-            institutionalEmail: row.email,
-            memberType: row.memberType,
-            roles: { create: { role: "MEMBER" } },
-          },
+        (await tx.orm.public.Member.create({
+          fullName: row.fullName,
+          institutionalEmail: row.email,
+          memberType: row.memberType,
+          roles: (roles) => roles.create([{ role: "MEMBER" }]),
         }));
 
       if (existing) {
-        await tx.member.update({
-          where: { id: existing.id },
-          data: { fullName: row.fullName, memberType: row.memberType },
+        await tx.orm.public.Member.where({ id: existing.id }).update({
+          fullName: row.fullName,
+          memberType: row.memberType,
         });
       }
 
@@ -464,23 +509,22 @@ export async function commitMemberImport(input: {
           (item) => item.committeeId === committee.id && item.isActive
         );
         if (active) continue;
-        await tx.memberCommittee.create({
-          data: { memberId: member.id, committeeId: committee.id },
+        await tx.orm.public.MemberCommittee.create({
+          memberId: member.id,
+          committeeId: committee.id,
         });
       }
     }
 
-    await tx.importJob.create({
-      data: {
-        type: "MEMBERS",
-        status: "COMMITTED",
-        filename: input.filename,
-        createdById: input.actor.id,
-        summary: {
-          valid: input.preview.valid.length,
-          warnings: input.preview.warnings.length,
-          errors: 0,
-        },
+    await tx.orm.public.ImportJob.create({
+      type: "MEMBERS",
+      status: "COMMITTED",
+      filename: input.filename,
+      createdById: input.actor.id,
+      summary: {
+        valid: input.preview.valid.length,
+        warnings: input.preview.warnings.length,
+        errors: 0,
       },
     });
   });
@@ -521,33 +565,33 @@ export async function importFormsAttendances(input: {
 
   for (const row of input.rows) {
     const email = normalizeEmail(row.email);
-    const member = await prisma.member.findUnique({ where: { institutionalEmail: email } });
+    const member = await db.orm.public.Member.where({ institutionalEmail: email }).first();
     if (!member) {
       results.errors.push(`Integrante no encontrado: ${email}`);
       continue;
     }
 
-    const activity = await prisma.activity.findFirst({
-      where: {
-        OR: [{ publicId: row.activityKey }, { name: row.activityKey }, { id: row.activityKey }],
-      },
-    });
+    const activity = await db.orm.public.Activity.where((rowActivity) =>
+      or(
+        rowActivity.publicId.eq(row.activityKey),
+        rowActivity.name.eq(row.activityKey),
+        rowActivity.id.eq(row.activityKey)
+      )
+    ).first();
     if (!activity) {
       results.errors.push(`Actividad no encontrada: ${row.activityKey}`);
       continue;
     }
 
     try {
-      await prisma.$transaction(async (tx) => {
-        const attendance = await tx.attendance.create({
-          data: {
-            activityId: activity.id,
-            memberId: member.id,
-            status: "APPROVED",
-            registeredAt: row.registeredAt ?? new Date(),
-            approvedAt: new Date(),
-            source: input.source ?? "MICROSOFT_FORMS",
-          },
+      await db.transaction(async (tx) => {
+        const attendance = await tx.orm.public.Attendance.create({
+          activityId: activity.id,
+          memberId: member.id,
+          status: "APPROVED",
+          registeredAt: row.registeredAt ? toIso(row.registeredAt) : isoNow(),
+          approvedAt: isoNow(),
+          source: input.source ?? "MICROSOFT_FORMS",
         });
         await syncAttendanceCredit(tx, {
           attendanceId: attendance.id,
@@ -584,7 +628,7 @@ export type FormsImportPreview = {
 const formsImportRowStoredSchema = z.object({
   email: z.string(),
   activityKey: z.string(),
-  registeredAt: z.string().datetime().optional(),
+  registeredAt: z.string().datetime().nullable().optional(),
 });
 
 const formsImportPreviewSchema = z.object({
@@ -630,7 +674,7 @@ export async function previewFormsImport(rows: FormsSpreadsheetRow[]): Promise<F
   return { valid, warnings, errors };
 }
 
-function parseFormsImportPreview(value: Prisma.JsonValue | null): FormsImportPreview | null {
+function parseFormsImportPreview(value: JsonValue | null): FormsImportPreview | null {
   const parsed = formsImportPreviewSchema.safeParse(value);
   if (!parsed.success) return null;
   return {
@@ -649,7 +693,7 @@ function serializeFormsPreview(preview: FormsImportPreview) {
     valid: preview.valid.map((row) => ({
       email: row.email,
       activityKey: row.activityKey,
-      registeredAt: row.registeredAt?.toISOString(),
+      registeredAt: row.registeredAt ? row.registeredAt.toISOString() : null,
     })),
     warnings: preview.warnings,
     errors: preview.errors,
@@ -662,28 +706,24 @@ export async function saveFormsImportPreview(input: {
   preview: FormsImportPreview;
 }) {
   requireAdmin(input.actor);
-  const job = await prisma.importJob.create({
-    data: {
-      type: "FORMS",
-      status: "PREVIEWED",
-      filename: input.filename,
-      createdById: input.actor.id,
-      summary: serializeFormsPreview(input.preview),
-    },
+  const job = await db.orm.public.ImportJob.create({
+    type: "FORMS",
+    status: "PREVIEWED",
+    filename: input.filename,
+    createdById: input.actor.id,
+    summary: serializeFormsPreview(input.preview),
   });
   return job.id;
 }
 
 export async function loadFormsImportPreview(input: { actor: Actor; previewId: string }) {
   requireAdmin(input.actor);
-  const job = await prisma.importJob.findFirst({
-    where: {
-      id: input.previewId,
-      createdById: input.actor.id,
-      type: "FORMS",
-      status: "PREVIEWED",
-    },
-  });
+  const job = await db.orm.public.ImportJob.where({
+    id: input.previewId,
+    createdById: input.actor.id,
+    type: "FORMS",
+    status: "PREVIEWED",
+  }).first();
   if (!job) {
     throw new DomainError(
       ErrorCodes.NOT_FOUND,
@@ -691,7 +731,8 @@ export async function loadFormsImportPreview(input: { actor: Actor; previewId: s
       404
     );
   }
-  const preview = parseFormsImportPreview(job.summary);
+  // SAFETY: ImportJob.summary is JSON written by saveFormsImportPreview.
+  const preview = parseFormsImportPreview(job.summary as JsonValue | null);
   if (!preview) {
     throw new DomainError(
       ErrorCodes.IMPORT_INVALID,

@@ -64,7 +64,7 @@ Otras fórmulas futuras (brief §28), no hay editor matemático:
 ## Deuda consciente
 
 - Rate limit de OTP/magic link es por filas `AuthChallenge`, no distribuido.
-- `loading.tsx` en `/app` y `/admin` está bloqueado por un error de hidratación de Next 16.1.6 (ADR-024). **Repro:** crear `src/app/admin/loading.tsx` que devuelva `<p>Cargando…</p>`, abrir `/admin/points` con la consola abierta → «Hydration failed», con el diff `+ <main className="min-w-0 flex-1 p-4 md:p-8">` / `- <Suspense>` apuntando a `admin/layout.tsx:12`. Reintentar al subir de versión.
+- `loading.tsx` en `/app` y `/admin` está bloqueado por un error de hidratación (ADR-024). **Repro:** crear `src/app/admin/loading.tsx` que devuelva `<p>Cargando…</p>`, abrir `/admin/points` con la consola abierta → «Hydration failed», con el diff `+ <main className="min-w-0 flex-1 p-4 md:p-8">` / `- <Suspense>` apuntando a `admin/layout.tsx:12`. Reintentar al subir de versión.
 - El coalescing de efectos es por instancia de proceso; con varias instancias cada una hace su recompute (idempotente, pero no compartido).
 - Totales de ranking se agregan en query; no hay materialized view.
 - E2E cubre login, registro, rankings y creación admin; no toda la matriz de roles.

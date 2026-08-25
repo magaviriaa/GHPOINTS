@@ -1,32 +1,22 @@
 import "server-only";
 
-import type { PointTransactionType, Prisma as PrismaNS } from "@prisma/client";
-import { prisma } from "@/server/db/prisma";
+import type { PointTransactionType } from "@/server/db/types";
+import { db, type Tx } from "@/server/db/prisma";
 import { isUniqueConstraint } from "@/server/db/errors";
 import { DomainError, ErrorCodes } from "@/server/domain/errors";
 
-type TransactionClient = PrismaNS.TransactionClient;
-
-export async function findActivityTransaction(
-  tx: TransactionClient,
-  attendanceId: string
-) {
-  return tx.pointTransaction.findFirst({
-    where: { attendanceId, type: "ACTIVITY" },
-  });
+export async function findActivityTransaction(tx: Tx, attendanceId: string) {
+  return tx.orm.public.PointTransaction.where({ attendanceId, type: "ACTIVITY" }).first();
 }
 
-export async function findUnreversedActivityTransaction(
-  tx: TransactionClient,
-  attendanceId: string
-) {
-  return tx.pointTransaction.findFirst({
-    where: {
-      attendanceId,
-      type: "ACTIVITY",
-      reversedBy: { is: null },
-    },
-  });
+export async function findUnreversedActivityTransaction(tx: Tx, attendanceId: string) {
+  const row = await tx.orm.public.PointTransaction.where({
+    attendanceId,
+    type: "ACTIVITY",
+  }).first();
+  if (!row) return null;
+  const reversal = await tx.orm.public.PointTransaction.where({ reversalOfId: row.id }).first();
+  return reversal ? null : row;
 }
 
 function reversedActivityCreditConflict() {
@@ -38,7 +28,7 @@ function reversedActivityCreditConflict() {
 }
 
 export async function createActivityPoints(
-  tx: TransactionClient,
+  tx: Tx,
   input: {
     memberId: string;
     seasonId: string;
@@ -58,17 +48,15 @@ export async function createActivityPoints(
   }
 
   try {
-    return await tx.pointTransaction.create({
-      data: {
-        memberId: input.memberId,
-        seasonId: input.seasonId,
-        activityId: input.activityId,
-        attendanceId: input.attendanceId,
-        points: input.points,
-        type: "ACTIVITY",
-        reason: input.reason,
-        createdById: input.createdById ?? null,
-      },
+    return await tx.orm.public.PointTransaction.create({
+      memberId: input.memberId,
+      seasonId: input.seasonId,
+      activityId: input.activityId,
+      attendanceId: input.attendanceId,
+      points: input.points,
+      type: "ACTIVITY",
+      reason: input.reason,
+      createdById: input.createdById ?? null,
     });
   } catch (error) {
     if (isUniqueConstraint(error)) {
@@ -81,23 +69,21 @@ export async function createActivityPoints(
 }
 
 export async function reverseTransaction(
-  tx: TransactionClient,
+  tx: Tx,
   input: {
     originalId: string;
     createdById?: string | null;
     reason: string;
   }
 ) {
-  const original = await tx.pointTransaction.findUnique({
-    where: { id: input.originalId },
-  });
+  const original = await tx.orm.public.PointTransaction.first({ id: input.originalId });
   if (!original) {
     throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos esa transacción.", 404);
   }
 
-  const existingReversal = await tx.pointTransaction.findUnique({
-    where: { reversalOfId: original.id },
-  });
+  const existingReversal = await tx.orm.public.PointTransaction.where({
+    reversalOfId: original.id,
+  }).first();
   if (existingReversal) return existingReversal;
 
   if (original.type === "REVERSAL") {
@@ -109,24 +95,22 @@ export async function reverseTransaction(
   }
 
   try {
-    return await tx.pointTransaction.create({
-      data: {
-        memberId: original.memberId,
-        seasonId: original.seasonId,
-        activityId: original.activityId,
-        attendanceId: original.attendanceId,
-        points: -original.points,
-        type: "REVERSAL",
-        reason: input.reason,
-        createdById: input.createdById ?? null,
-        reversalOfId: original.id,
-      },
+    return await tx.orm.public.PointTransaction.create({
+      memberId: original.memberId,
+      seasonId: original.seasonId,
+      activityId: original.activityId,
+      attendanceId: original.attendanceId,
+      points: -original.points,
+      type: "REVERSAL",
+      reason: input.reason,
+      createdById: input.createdById ?? null,
+      reversalOfId: original.id,
     });
   } catch (error) {
     if (isUniqueConstraint(error)) {
-      const raced = await tx.pointTransaction.findUnique({
-        where: { reversalOfId: original.id },
-      });
+      const raced = await tx.orm.public.PointTransaction.where({
+        reversalOfId: original.id,
+      }).first();
       if (raced) return raced;
     }
     throw error;
@@ -134,7 +118,7 @@ export async function reverseTransaction(
 }
 
 export async function createManualPoints(
-  tx: TransactionClient,
+  tx: Tx,
   input: {
     memberId: string;
     seasonId: string;
@@ -154,38 +138,39 @@ export async function createManualPoints(
     );
   }
 
-  return tx.pointTransaction.create({
-    data: {
-      memberId: input.memberId,
-      seasonId: input.seasonId,
-      activityId: input.activityId ?? null,
-      points: input.points,
-      type: input.type,
-      reason,
-      createdById: input.createdById,
-    },
+  return tx.orm.public.PointTransaction.create({
+    memberId: input.memberId,
+    seasonId: input.seasonId,
+    activityId: input.activityId ?? null,
+    points: input.points,
+    type: input.type,
+    reason,
+    createdById: input.createdById,
   });
 }
 
 export async function sumMemberPoints(memberId: string, seasonId: string) {
-  const result = await prisma.pointTransaction.aggregate({
-    where: { memberId, seasonId },
-    _sum: { points: true },
-  });
-  return result._sum.points ?? 0;
+  const result = await db.orm.public.PointTransaction.where({ memberId, seasonId }).aggregate(
+    (aggregate) => ({ total: aggregate.sum("points") })
+  );
+  return result.total ?? 0;
 }
 
 export async function listMemberPointHistory(
   memberId: string,
   filters?: { seasonId?: string; take?: number }
 ) {
-  return prisma.pointTransaction.findMany({
-    where: {
-      memberId,
-      seasonId: filters?.seasonId,
-    },
-    include: { activity: true },
-    orderBy: { createdAt: "desc" },
-    take: filters?.take,
-  });
+  let collection = db.orm.public.PointTransaction.where({ memberId })
+    .select("id", "points", "type", "reason", "createdAt")
+    .include("activity", (activity) => activity.select("id", "name"))
+    .orderBy((row) => row.createdAt.desc());
+
+  if (filters?.seasonId) {
+    collection = collection.where({ seasonId: filters.seasonId });
+  }
+  if (filters?.take !== undefined) {
+    collection = collection.limit(filters.take);
+  }
+
+  return collection.all();
 }

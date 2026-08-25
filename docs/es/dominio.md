@@ -1,6 +1,6 @@
 # Dominio
 
-Toda la regla de negocio vive en `src/server/domain/`. Los archivos `*-pure.ts` no tocan la base de datos. Los demás importan `server-only` y Prisma. Las páginas y actions no deben duplicar estas reglas.
+Toda la regla de negocio vive en `src/server/domain/`. Los archivos `*-pure.ts` no tocan la base de datos. Los demás importan `server-only` y el cliente Prisma (`db` / `tx.orm`). Las páginas y actions no deben duplicar estas reglas.
 
 Errores: `DomainError` + `ErrorCodes` en `errors.ts`. `toUserMessage` muestra el mensaje de dominio o un genérico y loguea el resto.
 
@@ -24,16 +24,16 @@ Tipos `Actor` y `ActorRole`. Predicados y `require*` descritos en [autenticacion
 
 ## Puntos — `points.ts` (I/O)
 
-Ledger inmutable. Recibe un `TransactionClient` Prisma para componer con asistencia.
+Ledger inmutable. Recibe el cliente de transacción (`Tx`) para componer con asistencia.
 
 | Función | Comportamiento |
 | --- | --- |
 | `findActivityTransaction` | Primera fila `ACTIVITY` de una asistencia (haya o no reversión). |
-| `findUnreversedActivityTransaction` | `ACTIVITY` sin `reversedBy`. |
-| `createActivityPoints` | Si ya hay crédito vivo, lo devuelve (idempotente). Si hay `ACTIVITY` ya revertida, lanza `CONFLICT` («Usa un ajuste manual»). Crea la fila; en carrera `P2002` relee. |
+| `findUnreversedActivityTransaction` | `ACTIVITY` sin fila con `reversalOfId` apuntando a ella. |
+| `createActivityPoints` | Si ya hay crédito vivo, lo devuelve (idempotente). Si hay `ACTIVITY` ya revertida, lanza `CONFLICT` («Usa un ajuste manual»). Crea la fila; en carrera una unique (`23505`) relee. |
 | `reverseTransaction` | No se puede revertir un `REVERSAL`. Si ya existe reversión, la devuelve. Puntos = `-original.points`, `reversalOfId` unique. |
 | `createManualPoints` | Tipos `MANUAL_ADJUSTMENT` \| `BONUS` \| `PENALTY`. `reason` no vacío. |
-| `sumMemberPoints` | `aggregate _sum` por integrante y temporada. |
+| `sumMemberPoints` | `aggregate` `sum("points")` por integrante y temporada. |
 | `listMemberPointHistory` | Historial con actividad, más reciente primero. |
 
 Invariante: una asistencia tiene **como máximo** una fila `ACTIVITY` (unique parcial). Tras revertirla no se vuelve a crear `ACTIVITY` para esa asistencia.
@@ -123,7 +123,7 @@ Los fallos se registran y nunca revierten el dominio: la Asistencia y el Ledger 
 
 `insertActivity` exige temporada writable (no CLOSED) vía `resolveSeason` + `assertSeasonWritable`.
 
-`attendanceMode` siempre `OPEN_LINK` (default Prisma); no hay UI ni rama para otro modo.
+`attendanceMode` siempre `OPEN_LINK` (default del contrato); no hay UI ni rama para otro modo.
 
 ---
 
@@ -241,21 +241,21 @@ Rutas: `/app/hall-of-fame` (sesión) y `/hall-of-fame` (misma página, **sin** l
 
 - `listMembers`: filtros query (nombre o correo), tipo, status, comité.
 - `getMemberDetail`: membresías históricas, roles, últimas 50 asistencias y transacciones (admin).
-- `createMember`: dominio institucional, rol MEMBER, membresías iniciales.
-- `updateMember`: si cambia email, actualiza `IdentityAccount` EMAIL_OTP `providerUserId`. INACTIVE → destruye sesiones.
-- `setMemberCommittees`: cierra con `leftAt` las que salen; crea nuevas. No borra historia.
+- `createMember`: dominio institucional, rol MEMBER, 1–3 membresías iniciales.
+- `updateMember`: si cambia email, actualiza `IdentityAccount` EMAIL_OTP `providerUserId`. Licencia o retiro → destruye sesiones.
+- `setMemberCommittees`: tope 3; un vigente no puede quedar en 0. Cierra con `leftAt` las que salen; crea nuevas. No borra historia («Perteneció a»).
 - `setMemberRoles`: garantiza rol MEMBER; no deja cero ADMIN; sincroniza líderes; refresca badge de líder.
 - `setMemberAdmin`: delega en `setMemberRoles`.
-- `listActiveMemberships` / `listMemberBadges`.
+- `listActiveMemberships` / `listMemberMemberships` / `listMemberBadges`.
 
 ---
 
 ## Lecturas de integrante — `member-reads.ts`
 
-Fachada para páginas `/app` (no Prisma):
+Fachada para páginas `/app` (sin consultar la base desde la página):
 
 - `getMemberHome`: standing, comités, últimos 5 movimientos, próxima actividad OPEN futura, membresías, puntos, nivel.
-- `getMemberProfile`: historial de temporada, badges, nivel.
+- `getMemberProfile`: historial de temporada, badges, nivel, membresías actuales e históricas, estrategia de crédito.
 - `getMemberActivities`: abiertas + publicadas de la temporada.
 
 El «comité» que el home muestra primero es el primero del array de membresías, no necesariamente el mejor rankeado.

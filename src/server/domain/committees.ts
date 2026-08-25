@@ -1,42 +1,58 @@
 import "server-only";
 
-import type { CommitteeStatus } from "@prisma/client";
-import { prisma } from "@/server/db/prisma";
+import { or } from "@prisma/orm-postgres/orm-client";
+import type { CommitteeStatus } from "@/server/db/types";
+import { db } from "@/server/db/prisma";
 import { slugify } from "@/lib/text";
+import { toDate } from "@/server/db/time";
 import { DomainError, ErrorCodes } from "@/server/domain/errors";
 import { writeAuditLog } from "@/server/domain/audit";
 import type { Actor } from "@/server/domain/authorization";
 import { requireAdmin } from "@/server/domain/authorization";
 
 export async function listCommittees() {
-  return prisma.committee.findMany({
-    include: {
-      _count: {
-        select: { memberships: { where: { isActive: true } } },
-      },
-    },
-    orderBy: { name: "asc" },
-  });
+  const rows = await db.orm.public.Committee.include("memberships", (memberships) =>
+    memberships.where({ isActive: true }).count()
+  )
+    .orderBy((committee) => committee.name.asc())
+    .all();
+
+  return rows.map((committee) => ({
+    ...committee,
+    _count: { memberships: committee.memberships },
+  }));
 }
 
 export async function getCommitteeDetail(idOrSlug: string) {
-  return prisma.committee.findFirst({
-    where: {
-      OR: [{ id: idOrSlug }, { slug: idOrSlug }],
-    },
-    include: {
-      memberships: {
-        where: { isActive: true },
-        include: { member: true },
-        orderBy: { member: { fullName: "asc" } },
-      },
-      scores: {
-        include: { activity: true },
-        orderBy: { activity: { startsAt: "desc" } },
-        take: 20,
-      },
-    },
-  });
+  const committee = await db.orm.public.Committee.where((row) =>
+    or(row.id.eq(idOrSlug), row.slug.eq(idOrSlug))
+  )
+    .include("memberships", (memberships) =>
+      memberships
+        .where({ isActive: true })
+        .select("id", "joinedAt")
+        .include("member", (member) => member.select("fullName"))
+        .orderBy((membership) => membership.joinedAt.asc())
+    )
+    .include("scores", (scores) =>
+      scores
+        .select("id", "participationRate", "computedAt")
+        .include("activity", (activity) => activity.select("name", "startsAt"))
+        .orderBy((score) => score.computedAt.desc())
+        .limit(20)
+    )
+    .first();
+
+  if (!committee) return null;
+
+  const memberships = [...committee.memberships].sort((left, right) =>
+    left.member.fullName.localeCompare(right.member.fullName, "es")
+  );
+  const scores = [...committee.scores].sort(
+    (left, right) => toDate(right.activity.startsAt).getTime() - toDate(left.activity.startsAt).getTime()
+  );
+
+  return { ...committee, memberships, scores };
 }
 
 export async function createCommittee(input: {
@@ -47,12 +63,10 @@ export async function createCommittee(input: {
 }) {
   requireAdmin(input.actor);
   const name = input.name.trim();
-  const committee = await prisma.committee.create({
-    data: {
-      name,
-      slug: slugify(name),
-      color: input.color || "#1e3a5f",
-    },
+  const committee = await db.orm.public.Committee.create({
+    name,
+    slug: slugify(name),
+    color: input.color || "#1e3a5f",
   });
   await writeAuditLog({
     actorId: input.actor.id,
@@ -74,20 +88,20 @@ export async function updateCommittee(input: {
   ip?: string | null;
 }) {
   requireAdmin(input.actor);
-  const current = await prisma.committee.findUnique({ where: { id: input.committeeId } });
+  const current = await db.orm.public.Committee.first({ id: input.committeeId });
   if (!current) {
     throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos ese comité.", 404);
   }
 
-  const committee = await prisma.committee.update({
-    where: { id: input.committeeId },
-    data: {
-      name: input.name?.trim() ?? current.name,
-      slug: input.name ? slugify(input.name) : current.slug,
-      color: input.color ?? current.color,
-      status: input.status ?? current.status,
-    },
+  const committee = await db.orm.public.Committee.where({ id: input.committeeId }).update({
+    name: input.name?.trim() ?? current.name,
+    slug: input.name ? slugify(input.name) : current.slug,
+    color: input.color ?? current.color,
+    status: input.status ?? current.status,
   });
+  if (!committee) {
+    throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos ese comité.", 404);
+  }
 
   await writeAuditLog({
     actorId: input.actor.id,

@@ -4,6 +4,17 @@ import { es } from "date-fns/locale";
 
 export const DEFAULT_TIMEZONE = "America/Bogota";
 
+/** Instant from the database: timestamptz ISO string or a `Date`. */
+export type Instant = Date | string;
+
+function asDate(value: Instant): Date {
+  return value instanceof Date ? value : new Date(value);
+}
+
+function isDateOnly(value: Instant): value is string {
+  return !(value instanceof Date) && /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
 export function getAppTimezone(): string {
   return process.env.APP_TIMEZONE?.trim() || DEFAULT_TIMEZONE;
 }
@@ -17,26 +28,30 @@ export function fromLocalInput(localDatetime: string, timeZone = getAppTimezone(
   return fromZonedTime(normalized, timeZone);
 }
 
-export function toLocalInput(date: Date, timeZone = getAppTimezone()): string {
-  const zoned = toZonedTime(date, timeZone);
+export function toLocalInput(date: Instant, timeZone = getAppTimezone()): string {
+  const zoned = toZonedTime(asDate(date), timeZone);
   return format(zoned, "yyyy-MM-dd'T'HH:mm");
 }
 
 export function formatDateTime(
-  date: Date,
+  date: Instant,
   timeZone = getAppTimezone(),
   pattern = "d MMM yyyy · h:mm a"
 ): string {
-  const zoned = toZonedTime(date, timeZone);
+  const zoned = toZonedTime(asDate(date), timeZone);
   return format(zoned, pattern, { locale: es });
 }
 
 export function formatDate(
-  date: Date,
+  date: Instant,
   timeZone = getAppTimezone(),
   pattern = "d MMM yyyy"
 ): string {
-  const zoned = toZonedTime(date, timeZone);
+  if (isDateOnly(date)) {
+    const [year, month, day] = date.split("-").map(Number);
+    return format(new Date(year, month - 1, day), pattern, { locale: es });
+  }
+  const zoned = toZonedTime(asDate(date), timeZone);
   return format(zoned, pattern, { locale: es });
 }
 

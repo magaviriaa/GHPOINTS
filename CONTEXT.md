@@ -6,7 +6,12 @@ Documentación detallada en español (capas, Prisma, auth, cada módulo de domin
 
 ## Integrante
 
-A person in the organization (`Member`). Identified by institutional email. Status `ACTIVE` or `INACTIVE`. Type `NEW` or `ACTIVE` (separate ranking boards).
+A person in the organization (`Member`). Identified by institutional email.
+
+- `memberType` `NEW` or `ACTIVE`: ranking boards (nuevos vs. veteranos). Not the life status.
+- `status`: `ACTIVE` (vigente), `ON_LEAVE` (licencia), `HONORARY` (honorario), `INACTIVE` (retirado).
+- Login: vigente and honorario. Rankings, badges, and committee eligible count: only vigente.
+- A vigente Integrante belongs to 1–3 committees at a time (`MAX_MEMBER_COMMITTEES`). Leaving a committee writes `leftAt` and keeps the row as «Perteneció a».
 
 ## Actor
 
@@ -14,7 +19,7 @@ The Integrante currently authenticated, plus roles. Authorization checks the Act
 
 ## Comité
 
-A working group (`Committee`). An Integrante may belong to several. Membership is historical: `joinedAt` / `leftAt` matter at Asistencia time.
+A working group (`Committee`). An Integrante may belong to 1–3 at a time. Membership is historical: `joinedAt` / `leftAt` matter at Asistencia time, so a semester switch does not rewrite past committee credit.
 
 ## Temporada
 
@@ -58,7 +63,7 @@ Season totals for ranking, derived from Score de comité snapshots. Ranking read
 
 ## Vista de integrante
 
-Home and profile pages read through the member-reads module. Pages do not query Prisma.
+Home and profile pages read through the member-reads module. Pages do not query the database.
 
 ## Vista de líder de comité
 

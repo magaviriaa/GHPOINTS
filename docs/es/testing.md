@@ -10,7 +10,7 @@ npm run test:e2e          # Playwright
 
 Vitest (`vitest.config.ts`) incluye `tests/unit/**/*.test.ts` y `tests/integration/**/*.test.ts`, environment Node, alias `@` → `src`. El módulo `server-only` se stubbea con `tests/empty.ts` para poder importar dominio en tests.
 
-Los integration se **saltan** si `DATABASE_URL` no empieza por `postgres` (`describe.skipIf`).
+Los integration se **saltan** si `DATABASE_URL` no empieza por `postgres` (`describe.skipIf`). Vitest corre esos archivos **en serie** (`fileParallelism: false`): todos escriben en la misma base y en paralelo `boardSize` y similares fallan por filas ajenas.
 
 ## Unitarios — `tests/unit/domain.test.ts`
 
@@ -40,7 +40,7 @@ Sin base de datos. Cubren funciones puras y contratos de error:
 
 ## Unitarios — `tests/unit/idempotency.test.ts`
 
-`isUniqueConstraint` reconoce Prisma `P2002`. El mensaje `ALREADY_REGISTERED` es el contrato de duplicado de asistencia.
+`isUniqueConstraint` reconoce la unique de Postgres (`sqlState === "23505"`). El mensaje `ALREADY_REGISTERED` es el contrato de duplicado de asistencia.
 
 ## Integración — Postgres
 
@@ -49,7 +49,7 @@ Crean filas con timestamp en correo/nombre y las borran en `afterAll`.
 | Archivo | Qué afirma |
 | --- | --- |
 | `tests/integration/attendance-credit.test.ts` | Aprobar crea una fila `ACTIVITY` de 20 pts; re-aprobar no duplica; rechazar deja neto 0; re-aprobar tras REJECTED lanza `CONFLICT`. |
-| `tests/integration/attendance-unique.test.ts` | Segundo `attendance.create` del mismo par viola unique (`P2002`). Usa una actividad OPEN y un miembro no admin del seed si existen. |
+| `tests/integration/attendance-unique.test.ts` | Segundo `Attendance.create` del mismo par viola unique (`23505`). Usa una actividad OPEN y un miembro no admin del seed si existen. |
 | `tests/integration/inactive-members.test.ts` | `getInactiveMembers(21)` incluye un ACTIVE recién creado sin asistencias. |
 | `tests/integration/decide-attendance.test.ts` | Lote de 3 aprobaciones: 3 filas APPROVED, 3 créditos `ACTIVITY`, 3 entradas de auditoría y **3 correos**; un id inexistente en el lote no aplica ninguno; cancelar sin motivo lanza `REASON_REQUIRED`. |
 | `tests/integration/member-board-position.test.ts` | `getMemberBoardPosition` coincide con el tablero completo en total, puesto y tamaño para cada entrada; el integrante sin transacciones queda fuera (`rank: null`); sin `board` abarca ambos tableros. |
@@ -72,7 +72,7 @@ Playwright arranca el server con `OTP_MAX_PER_EMAIL`/`OTP_MAX_PER_IP` altos (`pl
 
 ## Cómo correr con evidencia
 
-Unitarios: no necesitan `.env` de base (salvo que un import de env falle al cargar módulos que llaman `getEnv`; los tests puros no lo hacen). Integration: misma `DATABASE_URL` que la app, preferiblemente una base de desarrollo con migraciones aplicadas. E2E: app en 3000, seed aplicado, `INSTITUTIONAL_EMAIL_DOMAINS` coherente con los correos del test (`eafit.edu.co` por defecto en el spec si la env falta).
+Unitarios: no necesitan `.env` de base (salvo que un import de env falle al cargar módulos que llaman `getEnv`; los tests puros no lo hacen). Integration: misma `DATABASE_URL` que la app, preferiblemente una base de desarrollo con `db init` + constraints + seed. E2E: app en 3000, seed aplicado, `INSTITUTIONAL_EMAIL_DOMAINS` coherente con los correos del test (`eafit.edu.co` por defecto en el spec si la env falta).
 
 ## Lo que no hay
 

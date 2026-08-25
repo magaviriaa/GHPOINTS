@@ -1,6 +1,6 @@
 # Arquitectura
 
-GH Points es una aplicación **Next.js 16 (App Router) + React 19 + TypeScript** con **PostgreSQL** vía **Prisma**. No hay capa REST genérica de CRUD: la mutación del dominio entra por **server actions** (formularios) o por **pocas rutas API** (auth Entra, health, export, import Forms).
+GH Points es una aplicación **Next.js 16 (App Router) + React 19 + TypeScript** con **PostgreSQL 18** vía **Prisma**. No hay capa REST genérica de CRUD: la mutación del dominio entra por **server actions** (formularios) o por **pocas rutas API** (auth Entra, health, export, import Forms).
 
 ## Capas
 
@@ -29,10 +29,10 @@ flowchart TB
   subgraph domain [Dominio]
     Authz["authorization.ts Actor + RBAC"]
     Pure["*-pure.ts sin I/O"]
-    IO["módulos con Prisma"]
+    IO["módulos con I/O"]
   end
   subgraph data [Datos]
-    Prisma["db/prisma.ts"]
+    Prisma["db/prisma.ts → db.orm"]
     PG[(PostgreSQL)]
   end
 
@@ -56,7 +56,7 @@ flowchart TB
 
 | Capa | Dónde | Qué puede hacer | Qué no debe hacer |
 | --- | --- | --- | --- |
-| Páginas RSC | `src/app/**` | Leer vía módulos de dominio (`member-reads`, `leader-reads`, `analytics`) y renderizar | Consultar Prisma directo (regla de `CONTEXT.md`: vistas de integrante/líder no tocan Prisma) |
+| Páginas RSC | `src/app/**` | Leer vía módulos de dominio (`member-reads`, `leader-reads`, `analytics`) y renderizar | Consultar la base directo (regla de `CONTEXT.md`: vistas de integrante/líder no tocan la base) |
 | Componentes client | `src/components/**` | Enviar `FormData` a server actions, transiciones UI | Autorizar o calcular puntos |
 | Proxy (Node) | `src/proxy.ts` | Redirigir a `/login` si no hay cookie `gh_session`; emitir la CSP con nonce por request | Validar sesión, roles o estado del integrante (ADR-010) |
 | Server actions | `src/server/actions/**` | Parsear FormData, `requireAdmin` / `requireActor`, llamar dominio, `revalidatePath` | Reimplementar reglas |
@@ -65,7 +65,7 @@ flowchart TB
 | Config | `src/server/config/**` | Env Zod y `AppConfig` | Secretos en el cliente |
 | Lib | `src/lib/**` | Fechas TZ, `publicId`, slug, constantes de cookies | I/O de base de datos |
 
-Los archivos `*-pure.ts` (`scoring-pure`, `ranking-pure`, `badges-pure`, `levels-pure`, `hall-of-fame-pure`, `entra-pure`) no importan Prisma ni `server-only`. Los tests unitarios los cubren sin base de datos. Vitest aliasa `server-only` a `tests/empty.ts` para poder importar módulos de dominio en Node.
+Los archivos `*-pure.ts` (`scoring-pure`, `ranking-pure`, `badges-pure`, `levels-pure`, `hall-of-fame-pure`, `entra-pure`) no importan el cliente de datos ni `server-only`. Los tests unitarios los cubren sin base de datos. Vitest aliasa `server-only` a `tests/empty.ts` para poder importar módulos de dominio en Node.
 
 ## Flujo de un request autenticado
 
@@ -142,7 +142,7 @@ No existen ya las rutas `/api/members`, `/api/events`, `/api/committees` del pro
 
 - **Puntos, asistencia, score de comité, badges, temporada:** solo `src/server/domain/*`.
 - **Quién puede mutar:** `authorization.ts` + `requireAdmin` al inicio de cada función de dominio sensible (no basta el layout).
-- **Lecturas de integrante:** `member-reads.ts` (home, perfil, listado de actividades). Las páginas `/app` no importan Prisma.
+- **Lecturas de integrante:** `member-reads.ts` (home, perfil, listado de actividades). Las páginas `/app` no importan el cliente de datos.
 - **Lecturas de líder:** `leader-reads.ts`. El roster **omite email** (ADR-014).
 - **Overview admin:** `analytics.ts` sí usa Prisma (KPI, SQL semanal).
 - **UI:** páginas RSC + `ClientForm` / botones client. `src/components/ui/*` es shadcn (Input, Button, Tabs, etc.). Bloques de producto: `ui-blocks.tsx`, `podium/podium.tsx`.
@@ -166,8 +166,8 @@ El ledger nunca se edita: una corrección es otra fila `REVERSAL` o `MANUAL_ADJU
 
 | Pieza | Archivo | Notas |
 | --- | --- | --- |
-| Prisma singleton | `src/server/db/prisma.ts` | Reuso en HMR vía `globalThis` |
-| Unique Prisma | `src/server/db/errors.ts` | `P2002` → idempotencia |
+| Prisma singleton | `src/prisma/db.ts` reexportado en `src/server/db/prisma.ts` | Reuso en HMR vía `globalThis` |
+| Unique Postgres | `src/server/db/errors.ts` | `sqlState === "23505"` → idempotencia |
 | Errores de dominio | `src/server/domain/errors.ts` | `DomainError` + códigos |
 | Email | `src/server/email/sender.ts` | Resend si hay API key; si no, consola |
 | Notificaciones | `src/server/notify/events.ts` | Email + Teams fire-and-forget; fallo no revierte dominio (ADR-020) |
@@ -176,7 +176,7 @@ El ledger nunca se edita: una corrección es otra fila `REVERSAL` o `MANUAL_ADJU
 
 ## Config de Next
 
-`next.config.ts` marca `@prisma/client` y `prisma` como `serverExternalPackages` y fija `turbopack.root` al directorio del repo.
+`next.config.ts` marca `@prisma/orm-postgres`, `pg` y `prisma` como `serverExternalPackages` y fija `turbopack.root` al directorio del repo.
 
 `tsconfig.json` mapea `@/*` → `src/*`, `strict: true`. Excluye `tools/oxlint`.
 

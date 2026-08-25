@@ -1,7 +1,9 @@
 import "server-only";
 
-import type { MemberType } from "@prisma/client";
-import { prisma } from "@/server/db/prisma";
+import { and } from "@prisma/orm-postgres/orm-client";
+import type { MemberType } from "@/server/db/types";
+import { db } from "@/server/db/prisma";
+import { fromDecimal, toIso } from "@/server/db/time";
 import {
   parseRankingPeriod,
   rankingWindow,
@@ -23,35 +25,34 @@ export async function getIndividualRanking(input: {
 
   const period = parseRankingPeriod(input.period);
   const window = rankingWindow(period, { isoWeek: input.isoWeek });
-  let createdAt: { gte: Date; lt?: Date } | undefined;
+
+  let collection = db.orm.public.PointTransaction.where({ seasonId: season.id }).where((row) =>
+    row.member.some((member) =>
+      and(member.status.eq("ACTIVE"), member.memberType.eq(input.board))
+    )
+  );
   if (window) {
-    createdAt = { gte: window.gte };
-    if (window.lt !== null) createdAt.lt = window.lt;
+    collection = collection.where((row) => row.createdAt.gte(toIso(window.gte)));
+    const until = window.lt;
+    if (until !== null) {
+      collection = collection.where((row) => row.createdAt.lt(toIso(until)));
+    }
   }
 
-  const grouped = await prisma.pointTransaction.groupBy({
-    by: ["memberId"],
-    where: {
-      seasonId: season.id,
-      createdAt,
-      member: { status: "ACTIVE", memberType: input.board },
-    },
-    _sum: { points: true },
-  });
+  const grouped = await collection.groupBy("memberId").aggregate((agg) => ({ total: agg.sum("points") }));
+  const memberIds = grouped.map((row) => row.memberId);
+  if (memberIds.length === 0) {
+    return { season, period, entries: [] };
+  }
 
-  const members = await prisma.member.findMany({
-    where: {
-      id: { in: grouped.map((row) => row.memberId) },
-      status: "ACTIVE",
-      memberType: input.board,
-    },
-    include: {
-      committees: {
-        where: { isActive: true },
-        include: { committee: { select: { name: true, slug: true, color: true } } },
-      },
-    },
-  });
+  const members = await db.orm.public.Member.where((member) => member.id.in(memberIds))
+    .where({ status: "ACTIVE", memberType: input.board })
+    .include("committees", (committees) =>
+      committees
+        .where({ isActive: true })
+        .include("committee", (committee) => committee.select("name", "slug", "color"))
+    )
+    .all();
 
   const memberById = new Map(members.map((member) => [member.id, member]));
   const ranked = withCompetitionRanks(
@@ -63,7 +64,7 @@ export async function getIndividualRanking(input: {
           memberId: member.id,
           fullName: member.fullName,
           memberType: member.memberType,
-          total: row._sum.points ?? 0,
+          total: row.total ?? 0,
           committees: member.committees.map((item) => item.committee),
         };
       })
@@ -77,12 +78,6 @@ export async function getIndividualRanking(input: {
     entries: input.limit === undefined ? ranked : ranked.slice(0, input.limit),
   };
 }
-
-type BoardPositionRow = {
-  member_total: number | null;
-  above: number;
-  board_size: number;
-};
 
 /**
  * Position of one Integrante without materialising the board.
@@ -107,47 +102,53 @@ export async function getMemberBoardPosition(input: {
 
   const period = parseRankingPeriod(input.period);
   const window = rankingWindow(period, { isoWeek: input.isoWeek });
-  const from = window?.gte ?? new Date(0);
-  const to = window?.lt ?? null;
-  const board = input.board ?? null;
+  const fromIso = toIso(window?.gte ?? new Date(0));
+  const toIsoBound = window?.lt ? toIso(window.lt) : "9999-12-31T23:59:59.999Z";
+  const boardFilter = input.board ?? "";
 
-  const rows = await prisma.$queryRaw<BoardPositionRow[]>`
+  const plan = db.raw.sql`
     WITH totals AS (
       SELECT pt."memberId" AS member_id, SUM(pt.points)::int AS total
       FROM "PointTransaction" pt
       JOIN "Member" m ON m.id = pt."memberId"
       WHERE pt."seasonId" = ${season.id}
         AND m.status = 'ACTIVE'
-        AND (${board}::text IS NULL OR m."memberType"::text = ${board}::text)
-        AND pt."createdAt" >= ${from}
-        AND (${to}::timestamp IS NULL OR pt."createdAt" < ${to}::timestamp)
+        AND (${boardFilter} = '' OR m."memberType"::text = ${boardFilter})
+        AND pt."createdAt" >= ${fromIso}::timestamptz
+        AND pt."createdAt" < ${toIsoBound}::timestamptz
       GROUP BY pt."memberId"
     ),
     mine AS (
       SELECT total FROM totals WHERE member_id = ${input.memberId}
     )
     SELECT
-      (SELECT total FROM mine) AS member_total,
-      (SELECT COUNT(*)::int FROM totals WHERE total > (SELECT total FROM mine)) AS above,
-      (SELECT COUNT(*)::int FROM totals) AS board_size
-  `;
+      COALESCE((SELECT total FROM mine), 0)::int AS member_total,
+      COALESCE((SELECT COUNT(*)::int FROM totals WHERE total > (SELECT total FROM mine)), 0) AS above,
+      (SELECT COUNT(*)::int FROM totals) AS board_size,
+      (SELECT COUNT(*)::int FROM mine) AS present
+  `
+    .returnsRow({
+      member_total: "pg/int4@1",
+      above: "pg/int4@1",
+      board_size: "pg/int4@1",
+      present: "pg/int4@1",
+    })
+    .build();
+  const rows = await db.runtime().query(plan);
 
   const row = rows[0];
-  const total = row?.member_total ?? null;
+  const onBoard = (row?.present ?? 0) > 0;
   return {
     season,
     period,
-    total: total ?? 0,
-    rank: total === null ? null : (row?.above ?? 0) + 1,
+    total: onBoard ? (row?.member_total ?? 0) : 0,
+    rank: onBoard ? (row?.above ?? 0) + 1 : null,
     boardSize: row?.board_size ?? 0,
   };
 }
 
 export async function getMemberSeasonStanding(memberId: string, seasonId?: string) {
-  const member = await prisma.member.findUnique({
-    where: { id: memberId },
-    select: { memberType: true },
-  });
+  const member = await db.orm.public.Member.where({ id: memberId }).select("memberType").first();
   if (!member) return null;
 
   const position = await getMemberBoardPosition({
@@ -167,15 +168,11 @@ export async function getMemberSeasonStanding(memberId: string, seasonId?: strin
 }
 
 export async function getCommitteeSeasonScores(seasonId: string) {
-  const scores = await prisma.committeeActivityScore.findMany({
-    where: {
-      seasonId,
-      activity: { status: { in: ["CLOSED", "PROCESSED"] } },
-    },
-    include: {
-      committee: true,
-    },
-  });
+  const scores = await db.orm.public.CommitteeActivityScore.where({ seasonId })
+    .where((score) => score.activity.some((activity) => activity.status.in(["CLOSED", "PROCESSED"])))
+    .select("committeeId", "participationRate")
+    .include("committee", (committee) => committee.select("id", "name", "slug", "color", "status"))
+    .all();
 
   const byCommittee = new Map<
     string,
@@ -191,23 +188,24 @@ export async function getCommitteeSeasonScores(seasonId: string) {
   >();
 
   for (const score of scores) {
-    const current = byCommittee.get(score.committeeId) ?? {
+    const current = byCommittee.get(score.committeeId);
+    if (current) {
+      current.rates.push(fromDecimal(score.participationRate));
+      current.activities += 1;
+      continue;
+    }
+    byCommittee.set(score.committeeId, {
       committeeId: score.committeeId,
-      name: score.committee.name,
-      slug: score.committee.slug,
-      color: score.committee.color,
-      status: score.committee.status,
-      rates: [],
-      activities: 0,
-    };
-    current.rates.push(Number(score.participationRate));
-    current.activities += 1;
-    byCommittee.set(score.committeeId, current);
+      name: String(score.committee.name),
+      slug: String(score.committee.slug),
+      color: String(score.committee.color),
+      status: String(score.committee.status),
+      rates: [fromDecimal(score.participationRate)],
+      activities: 1,
+    });
   }
 
-  const committees = await prisma.committee.findMany({
-    where: { status: "ACTIVE" },
-  });
+  const committees = await db.orm.public.Committee.where({ status: "ACTIVE" }).all();
 
   return committees.map((committee) => {
     const current = byCommittee.get(committee.id);
@@ -233,10 +231,10 @@ export async function getCommitteeRanking(seasonId?: string) {
 }
 
 export async function getMemberCommitteeStandings(memberId: string, seasonId?: string) {
-  const memberships = await prisma.memberCommittee.findMany({
-    where: { memberId, isActive: true },
-    include: { committee: true },
-  });
+  const memberships = await db.orm.public.MemberCommittee.where({ memberId, isActive: true })
+    .select("committeeId")
+    .include("committee", (committee) => committee.select("id", "name", "slug", "color"))
+    .all();
   const ranking = await getCommitteeRanking(seasonId);
   return memberships.map((membership) => {
     const entry = ranking.entries.find((item) => item.committeeId === membership.committeeId);

@@ -1,16 +1,12 @@
 # Modelo de datos
 
-Fuente: `prisma/schema.prisma`. Proveedor: **PostgreSQL**. IDs internos: `cuid()`. El id de negocio en URLs públicas de actividad es `Activity.publicId` (nanoid 10, alfabeto `[0-9a-z]`), nunca el `id` interno (ADR-009).
+Fuente: `src/prisma/contract.prisma` (el contrato emitido vive junto a él: `contract.json` y `contract.d.ts`). Proveedor: **PostgreSQL**. IDs internos: `cuid(2)`. El id de negocio en URLs públicas de actividad es `Activity.publicId` (nanoid 10, alfabeto `[0-9a-z]`), nunca el `id` interno (ADR-009). Las tablas y enums se mapean a PascalCase (`@@map("Member")`, etc.).
 
-Migraciones:
+En TypeScript, `timestamptz` llega como string ISO y las fechas de calendario (`startDate`/`endDate` de temporada) como `YYYY-MM-DD`. Los `Decimal` del score de comité son string. Auditoría, Hall of Fame e import se guardan como `jsonb` (objetos o arrays, nunca un string JSON suelto: el decode de Prisma 8 falla). `AppConfig.value` es texto.
 
-1. `prisma/migrations/20260819004625_init/migration.sql` — esquema base.
-2. `prisma/migrations/20260819010000_partial_uniques/migration.sql` — uniques parciales.
-3. `prisma/migrations/20260819120000_p1_p3_features/migration.sql` — magic link, propuestas, QR dinámico, historial de `publicId`, `periodKey` de badges.
+Uniques parciales que el contrato no expresa (predicados `WHERE`) se aplican con `npm run db:constraints` (`src/prisma/apply-constraints.ts`).
 
-`prisma/migrations/migration_lock.toml` fija `provider = postgresql`.
-
-El seed (`prisma/seed.ts`) borra tablas en orden de FKs, crea config, 17 comités, temporada `2026-2` ACTIVE y `2026-1` CLOSED con Hall of Fame sintético, admin `gh.general@<dominio>`, líder GEMIS, ~50 integrantes, actividades y badges. Dominio de correo: primer valor de `INSTITUTIONAL_EMAIL_DOMAINS`.
+Base vacía: `prisma db init`. Cambios de contrato en local: `prisma db update`. Producción: `prisma db migrate` tras un `migration plan`. El seed (`prisma/seed.ts`) borra tablas en orden de FKs, crea config, 17 comités, temporada `2026-2` ACTIVE y `2026-1` CLOSED con Hall of Fame sintético, admin `gh.general@<dominio>`, líder GEMIS, ~50 integrantes, actividades y badges. Dominio de correo: primer valor de `INSTITUTIONAL_EMAIL_DOMAINS`.
 
 ## Diagrama de entidades
 
@@ -44,7 +40,7 @@ erDiagram
 
 ## Uniques parciales (PostgreSQL)
 
-Definidos en SQL, no como `@@unique` de Prisma (Prisma no expresa `WHERE`):
+Definidos en SQL (`src/prisma/apply-constraints.ts`), no como `@@unique` del contrato (el contrato no expresa `WHERE`):
 
 | Índice | Tabla | Predicado | Invariante |
 | --- | --- | --- | --- |
@@ -59,7 +55,7 @@ Definidos en SQL, no como `@@unique` de Prisma (Prisma no expresa `WHERE`):
 | Enum | Valores | Uso |
 | --- | --- | --- |
 | `MemberType` | `NEW`, `ACTIVE` | Tableros de ranking separados. No es el estado de cuenta. |
-| `MemberStatus` | `ACTIVE`, `INACTIVE` | Login y ranking solo `ACTIVE`. Inactivar destruye sesiones. |
+| `MemberStatus` | `ACTIVE`, `ON_LEAVE`, `HONORARY`, `INACTIVE` | Vigente / licencia / honorario / retirado. Login: vigente y honorario. Ranking y denominador de comité: solo vigente. |
 | `RoleCode` | `MEMBER`, `COMMITTEE_LEADER`, `ADMIN` | ADMIN = GH General. Leader va con `committeeId`. |
 | `CommitteeStatus` | `ACTIVE`, `INACTIVE` | Scoring solo comités `ACTIVE`. |
 | `SeasonStatus` | `UPCOMING`, `ACTIVE`, `CLOSED` | Cerrar no borra datos; dispara Hall of Fame. |
@@ -83,11 +79,11 @@ Persona de la organización. Identidad de negocio: `institutionalEmail` único, 
 
 | Campo | Tipo | Semántica |
 | --- | --- | --- |
-| `id` | cuid | Interno. No va en rankings públicos. |
+| `id` | cuid(2) | Interno. No va en rankings públicos. |
 | `fullName` | string | Orden visual de empates en ranking. |
 | `institutionalEmail` | unique | Login OTP y matching Entra. |
 | `memberType` | NEW/ACTIVE | Tablero. Un cambio a mitad de temporada mueve de tablero con el mismo saldo (ADR-008). |
-| `status` | ACTIVE/INACTIVE | Inactivo no entra ni aparece en ranking. |
+| `status` | ACTIVE / ON_LEAVE / HONORARY / INACTIVE | Vida en la OE. Licencia y retiro no entran; honorario entra pero no compite. |
 
 Índices: `(status, memberType)`, `fullName`.
 
@@ -122,7 +118,7 @@ Membresía **histórica**. `joinedAt` / `leftAt` / `isActive`. El numerador del 
 
 ### Season (Temporada)
 
-Ventana de scoring. `startDate`/`endDate` tipo `Date`. Unique parcial: una sola `ACTIVE`. Relación 1:1 opcional con `HallOfFameSeason`.
+Ventana de scoring. `startDate`/`endDate` son fechas de calendario (`YYYY-MM-DD`). Unique parcial: una sola `ACTIVE`. El snapshot de Hall of Fame se lee por `seasonId` en `HallOfFameSeason` (no hay navegación inversa 1:1 desde `Season`).
 
 ### Activity (Actividad)
 
@@ -169,7 +165,7 @@ Fuente de verdad de puntos (ADR-003). **No se edita ni se borra.**
 | `points` | Entero; reversión = negativo del original. |
 | `type` | Ver enum. |
 | `reason` | Obligatorio en asignaciones manuales. |
-| `reversalOfId` | Unique: a lo sumo una reversión por transacción. |
+| `reversalOfId` | Unique: a lo sumo una reversión por transacción. Una transacción está sin revertir si no existe otra fila con ese `reversalOfId`. |
 | `attendanceId` | Unique parcial para `type=ACTIVITY`. |
 
 Índices: `(seasonId, memberId)`, `(seasonId, createdAt)`, `(memberId, createdAt)`, actividad, asistencia.
@@ -181,7 +177,7 @@ Snapshot por comité y actividad. Unique `(committeeId, activityId)`.
 | Campo | Semántica |
 | --- | --- |
 | `eligibleMemberCount` | Denominador; se congela si `frozen` y la actividad está CLOSED/PROCESSED. |
-| `attendeeCredit` | Decimal 12,6. Numerador (créditos, no cabezas). |
+| `attendeeCredit` | Decimal (string en JS). Numerador (créditos, no cabezas). |
 | `participationRate` | `credit / eligible` (0 si eligible=0). |
 | `creditStrategy` | Estrategia usada al computar. |
 | `frozen` | `true` cuando la actividad está CLOSED o PROCESSED. |
@@ -194,7 +190,7 @@ Append-only. `action` string libre (p. ej. `MEMBER_CREATED`, `ATTENDANCE_APPROVE
 
 ### AppConfig
 
-Clave/valor JSON. Semilla: `committee_credit_strategy` = `FULL_CREDIT`, `timezone` = `America/Bogota`. La UI de settings solo edita la estrategia. La zona horaria de display sale de `APP_TIMEZONE` en env (`src/lib/dates.ts`), no de esta fila.
+Clave/valor de texto. Semilla: `committee_credit_strategy` = `FULL_CREDIT`, `timezone` = `America/Bogota`. La UI de settings solo edita la estrategia. La zona horaria de display sale de `APP_TIMEZONE` en env (`src/lib/dates.ts`), no de esta fila.
 
 ### AuthChallenge
 
@@ -210,7 +206,7 @@ Catálogo + otorgamientos. Unique `(memberId, badgeId, seasonId, periodKey)`. `p
 
 ### HallOfFameSeason
 
-Un snapshot por temporada cerrada. `top3Active` / `top3New` / `top3Committees` / `stats` en JSON (nombres, no emails ni ids internos). Los campos `activeWinnerId`, `newWinnerId`, `committeeWinnerId` existen en schema pero `persistHallOfFameSnapshot` los deja en `null` (privacidad).
+Un snapshot por temporada cerrada. `top3Active` / `top3New` / `top3Committees` / `stats` en JSON (nombres, no emails ni ids internos). Los campos `activeWinnerId`, `newWinnerId`, `committeeWinnerId` existen en el contrato pero `persistHallOfFameSnapshot` los deja en `null` (privacidad).
 
 ### ImportJob
 

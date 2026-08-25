@@ -1,54 +1,47 @@
 import "server-only";
 
-import { Prisma, type CommitteeCreditStrategy } from "@prisma/client";
-import { prisma } from "@/server/db/prisma";
+import type { CommitteeCreditStrategy } from "@/server/db/types";
+import { db } from "@/server/db/prisma";
+import { isoNow, toDate, toDecimal } from "@/server/db/time";
 import { getCreditStrategy } from "@/server/config/app-config";
 import {
   computeCommitteeSnapshots,
   type ExistingSnapshot,
 } from "@/server/domain/scoring-pure";
 
-function toDecimal(value: number) {
-  return new Prisma.Decimal(value.toFixed(6));
-}
-
 export async function recomputeActivityScores(activityId: string) {
-  const activity = await prisma.activity.findUnique({
-    where: { id: activityId },
-    select: {
-      id: true,
-      seasonId: true,
-      status: true,
-      attendances: {
-        where: { status: "APPROVED" },
-        select: { memberId: true, registeredAt: true },
-      },
-    },
-  });
+  const activity = await db.orm.public.Activity.where({ id: activityId })
+    .select("id", "seasonId", "status")
+    .include("attendances", (attendances) =>
+      attendances.where({ status: "APPROVED" }).select("memberId", "registeredAt")
+    )
+    .first();
   if (!activity) return;
 
   const shouldFreeze = activity.status === "CLOSED" || activity.status === "PROCESSED";
   const strategy = await getCreditStrategy();
 
+  const activeMembers = await db.orm.public.Member.where({ status: "ACTIVE" }).select("id").all();
+  const activeMemberIds = activeMembers.map((member) => member.id);
+
   const [committees, eligibleCounts, existingScores] = await Promise.all([
-    prisma.committee.findMany({
-      where: { status: "ACTIVE" },
-      orderBy: { id: "asc" },
-      select: { id: true },
-    }),
-    prisma.memberCommittee.groupBy({
-      by: ["committeeId"],
-      where: { isActive: true, member: { status: "ACTIVE" } },
-      _count: { _all: true },
-    }),
-    prisma.committeeActivityScore.findMany({
-      where: { activityId },
-      select: { committeeId: true, frozen: true, eligibleMemberCount: true },
-    }),
+    db.orm.public.Committee.where({ status: "ACTIVE" })
+      .orderBy((committee) => committee.id.asc())
+      .select("id")
+      .all(),
+    activeMemberIds.length === 0
+      ? Promise.resolve([])
+      : db.orm.public.MemberCommittee.where({ isActive: true })
+          .where((membership) => membership.memberId.in(activeMemberIds))
+          .groupBy("committeeId")
+          .aggregate((aggregate) => ({ total: aggregate.count() })),
+    db.orm.public.CommitteeActivityScore.where({ activityId })
+      .select("committeeId", "frozen", "eligibleMemberCount")
+      .all(),
   ]);
 
   const liveEligibleByCommittee = new Map(
-    eligibleCounts.map((row) => [row.committeeId, row._count._all])
+    eligibleCounts.map((row) => [row.committeeId, row.total])
   );
   const existingByCommittee = new Map<string, ExistingSnapshot>(
     existingScores.map((score) => [
@@ -59,20 +52,29 @@ export async function recomputeActivityScores(activityId: string) {
 
   const approvedMemberIds = activity.attendances.map((row) => row.memberId);
   const memberships = approvedMemberIds.length
-    ? await prisma.memberCommittee.findMany({
-        where: { memberId: { in: approvedMemberIds } },
-        select: { memberId: true, committeeId: true, joinedAt: true, leftAt: true },
-      })
+    ? await db.orm.public.MemberCommittee.where((membership) =>
+        membership.memberId.in(approvedMemberIds)
+      )
+        .select("memberId", "committeeId", "joinedAt", "leftAt")
+        .all()
     : [];
 
-  const computedAt = new Date();
+  const computedAt = isoNow();
   const snapshots = computeCommitteeSnapshots({
     committees: committees.map((committee) => ({
       id: committee.id,
       liveEligibleCount: liveEligibleByCommittee.get(committee.id) ?? 0,
     })),
-    attendances: activity.attendances,
-    memberships,
+    attendances: activity.attendances.map((row) => ({
+      memberId: row.memberId,
+      registeredAt: toDate(row.registeredAt),
+    })),
+    memberships: memberships.map((membership) => ({
+      memberId: membership.memberId,
+      committeeId: membership.committeeId,
+      joinedAt: toDate(membership.joinedAt),
+      leftAt: membership.leftAt ? toDate(membership.leftAt) : null,
+    })),
     existingByCommittee,
     strategy,
     shouldFreeze,
@@ -80,21 +82,9 @@ export async function recomputeActivityScores(activityId: string) {
 
   if (snapshots.length === 0) return;
 
-  await prisma.$transaction(
-    snapshots.map((snapshot) =>
-      prisma.committeeActivityScore.upsert({
-        where: {
-          committeeId_activityId: { committeeId: snapshot.committeeId, activityId },
-        },
-        update: {
-          seasonId: activity.seasonId,
-          eligibleMemberCount: snapshot.eligibleMemberCount,
-          attendeeCredit: toDecimal(snapshot.attendeeCredit),
-          participationRate: toDecimal(snapshot.participationRate),
-          creditStrategy: strategy,
-          frozen: shouldFreeze,
-          computedAt,
-        },
+  await db.transaction(async (tx) => {
+    for (const snapshot of snapshots) {
+      await tx.orm.public.CommitteeActivityScore.upsert({
         create: {
           committeeId: snapshot.committeeId,
           activityId,
@@ -105,27 +95,37 @@ export async function recomputeActivityScores(activityId: string) {
           creditStrategy: strategy,
           frozen: shouldFreeze,
         },
-      })
-    )
-  );
+        update: {
+          seasonId: activity.seasonId,
+          eligibleMemberCount: snapshot.eligibleMemberCount,
+          attendeeCredit: toDecimal(snapshot.attendeeCredit),
+          participationRate: toDecimal(snapshot.participationRate),
+          creditStrategy: strategy,
+          frozen: shouldFreeze,
+          computedAt,
+        },
+        conflictOn: { committeeId: snapshot.committeeId, activityId },
+      });
+    }
+  });
 }
 
 export async function recomputeSeasonScores(seasonId: string) {
-  const activities = await prisma.activity.findMany({
-    where: { seasonId, status: { in: ["OPEN", "CLOSED", "PROCESSED"] } },
-    select: { id: true },
-  });
+  const activities = await db.orm.public.Activity.where({ seasonId })
+    .where((activity) => activity.status.in(["OPEN", "CLOSED", "PROCESSED"]))
+    .select("id")
+    .all();
   for (const activity of activities) {
     await recomputeActivityScores(activity.id);
   }
 }
 
 export async function listActivityCommitteeScores(activityId: string) {
-  return prisma.committeeActivityScore.findMany({
-    where: { activityId },
-    include: { committee: true },
-    orderBy: { participationRate: "desc" },
-  });
+  return db.orm.public.CommitteeActivityScore.where({ activityId })
+    .select("id", "attendeeCredit", "eligibleMemberCount", "participationRate")
+    .include("committee", (committee) => committee.select("id", "name", "color"))
+    .orderBy((score) => score.participationRate.desc())
+    .all();
 }
 
 export function snapshotStrategyLabel(strategy: CommitteeCreditStrategy): string {

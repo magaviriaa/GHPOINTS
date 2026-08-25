@@ -39,6 +39,7 @@ import {
 import { DomainError, ErrorCodes, toUserMessage } from "@/server/domain/errors";
 import { requireAdmin, type Actor } from "@/server/domain/authorization";
 import { dispatchAppEvent } from "@/server/notify/events";
+import { MEMBER_STATUS_VALUES } from "@/lib/constants";
 import { num, parseEnum, str, strs } from "@/server/actions/form-parse";
 
 type Result = { ok: true } | { ok: false; message: string };
@@ -86,7 +87,7 @@ export async function adminUpdateMemberAction(formData: FormData): Promise<Resul
         fullName: str(data, "fullName"),
         institutionalEmail: str(data, "institutionalEmail"),
         memberType: parseEnum(str(data, "memberType") || "NEW", ["NEW", "ACTIVE"] as const),
-        status: parseEnum(str(data, "status") || "ACTIVE", ["ACTIVE", "INACTIVE"] as const),
+        status: parseEnum(str(data, "status") || "ACTIVE", MEMBER_STATUS_VALUES),
         ip,
       });
       await setMemberCommittees({

@@ -3,8 +3,9 @@ import { Award } from "lucide-react";
 
 import { requirePageActor } from "@/server/auth/guard";
 import { getMemberProfile } from "@/server/domain/member-reads";
+import { splitMemberships } from "@/server/domain/members-pure";
 import { formatDateTime } from "@/lib/dates";
-import { MEMBER_TYPE, POINT_TRANSACTION_TYPE } from "@/lib/labels";
+import { MEMBER_STATUS, MEMBER_TYPE, POINT_TRANSACTION_TYPE } from "@/lib/labels";
 import { StatusBadge } from "@/components/ui/status-badge";
 import {
   EmptyState,
@@ -13,6 +14,8 @@ import {
   Marcador,
   SectionHeader,
 } from "@/components/ui-blocks";
+import { MembershipHistory } from "@/components/members/membership-history";
+import { CommitteeCreditNote } from "@/components/members/committee-credit-note";
 
 export const metadata: Metadata = { title: "Perfil" };
 
@@ -30,6 +33,7 @@ export default async function MePage() {
           </h1>
           <div className="mt-1 flex flex-wrap items-center gap-2">
             <StatusBadge dictionary={MEMBER_TYPE} value={actor.memberType} />
+            <StatusBadge dictionary={MEMBER_STATUS} value={actor.status} />
             <span className="text-sm text-muted-foreground">
               {profile.season ? `Temporada ${profile.season.name}` : "Sin temporada activa"}
             </span>
@@ -42,30 +46,14 @@ export default async function MePage() {
         <LevelTrack className="mt-6" level={profile.level} points={profile.points} onBand />
       </section>
 
-      <section className="space-y-3">
-        <SectionHeader title="Tus comités" />
-        {profile.memberships.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            Todavía no estás en un comité. GH General puede asignarte.
-          </p>
-        ) : (
-          <ul className="flex flex-wrap gap-2">
-            {profile.memberships.map((item) => (
-              <li
-                key={item.id}
-                className="inline-flex items-center gap-2 rounded-full border bg-card py-1 pr-3 pl-2 text-sm font-medium"
-              >
-                <span
-                  className="size-2.5 rounded-full"
-                  style={{ background: item.committee.color }}
-                  aria-hidden
-                />
-                {item.committee.name}
-              </li>
-            ))}
-          </ul>
+      <MembershipHistory memberships={profile.memberships} />
+
+      <CommitteeCreditNote
+        strategy={profile.creditStrategy}
+        committeeNames={splitMemberships(profile.memberships).current.map(
+          (item) => item.committee.name
         )}
-      </section>
+      />
 
       <section className="space-y-3">
         <SectionHeader title="Logros" />

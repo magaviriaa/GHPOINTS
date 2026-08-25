@@ -64,7 +64,7 @@ Si un integrante pasa de NEW a ACTIVE a mitad de temporada, **cambia de tablero*
 
 ## ADR-009 — IDs públicos de actividad
 
-**Decisión:** `Activity.publicId` (nanoid) en la URL `/a/{publicId}`. Los IDs internos `cuid()` no se exponen en QR ni rankings.
+**Decisión:** `Activity.publicId` (nanoid) en la URL `/a/{publicId}`. Los IDs internos `cuid(2)` no se exponen en QR ni rankings.
 
 Rotar `publicId` invalida QR impresos y deja el id anterior en `ActivityPublicIdHistory`. El QR dinámico (P3) es un token rotativo opcional (`requireAttendanceToken`); el enlace estático `/a/{publicId}` sigue funcionando hasta que se active.
 
@@ -124,7 +124,7 @@ Rotar `publicId` invalida QR impresos y deja el id anterior en `ActivityPublicId
 
 **Por qué:** cientos de escaneos simultáneos del mismo QR ejecutaban, cada uno y dentro del request, un recompute de todos los comités (~17 upserts sobre filas compartidas) más cuatro agregaciones completas de ranking. Serializaba por contención de filas.
 
-Además, el `catch` de duplicados envolvía ese trabajo derivado: un `P2002` del snapshot de comité se le mostraba al integrante como «Ya registraste tu asistencia» aunque el registro sí se había creado.
+Además, el `catch` de duplicados envolvía ese trabajo derivado: una unique del snapshot de comité se le mostraba al integrante como «Ya registraste tu asistencia» aunque el registro sí se había creado.
 
 **Consecuencia:** Asistencia y Ledger siguen siendo inmediatos y transaccionales; **Score de comité y badges son eventualmente consistentes** respecto al registro (segundos). Las rutas administrativas (aprobar, rechazar, anular, alta manual) usan la variante `runAttendanceEffects`, que sí se espera, para que el admin vea datos frescos al recargar.
 
@@ -167,3 +167,12 @@ Revisar cuando suba la versión de Next: la repro está en `docs/backlog.md`.
 - **Aprobar siempre notifica**, para 1 y para N. El despacho sale por el seam post-commit (`dispatchAppEvent`), así que cuarenta correos no bloquean al admin, y los destinatarios se cargan en una sola consulta.
 
 Consecuencia operativa: una aprobación masiva de N integrantes envía N correos. Es deliberado — el integrante se entera de sus puntos por el mismo canal, lo decidan solo o en bloque.
+
+## ADR-025 — Estados de vida y tope de 3 comités
+
+**Decisión:** `MemberStatus` es el eje de vida (`ACTIVE` vigente, `ON_LEAVE` licencia, `HONORARY` honorario, `INACTIVE` retirado). `MemberType` sigue siendo solo el tablero (NEW / ACTIVE). Un integrante vigente pertenece a 1–3 comités; al salir, la fila queda con `leftAt` y se muestra como «Perteneció a».
+
+**Puntos:** el ledger individual no se parte. El crédito de comité sí, según `committee_credit_strategy` y cuántos comités tenía la persona *el día de la asistencia* (ADR-006 + ADR-007). FULL_CREDIT: 1,0 a cada comité. FRACTIONAL_CREDIT: 1/n a cada uno.
+
+**Login:** vigente y honorario. Ranking, badges y denominador de comité: solo vigente. Licencia y retiro destruyen sesiones.
+

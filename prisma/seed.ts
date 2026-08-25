@@ -1,17 +1,16 @@
 import "dotenv/config";
-import {
+import { db } from "../src/prisma/db";
+import { isoNow, toDateOnly, toIso } from "@/server/db/time";
+import type {
   ApprovalMode,
-  AttendanceSource,
   AttendanceStatus,
+  MemberStatus,
   MemberType,
-  PrismaClient,
-} from "@prisma/client";
+} from "@/server/db/types";
 import { createPublicId } from "../src/lib/public-id";
 import { slugify } from "../src/lib/text";
 import { recomputeActivityScores } from "../src/server/domain/scoring";
 import { refreshBadges } from "../src/server/domain/badges";
-
-const prisma = new PrismaClient();
 
 const COMMITTEES = [
   "A3",
@@ -107,95 +106,86 @@ function daysFromNow(days: number, hours = 12) {
 async function main() {
   const emailDomain = domain();
 
-  await prisma.pointTransaction.deleteMany();
-  await prisma.attendance.deleteMany();
-  await prisma.committeeActivityScore.deleteMany();
-  await prisma.activityPublicIdHistory.deleteMany();
-  await prisma.activity.deleteMany();
-  await prisma.memberCommittee.deleteMany();
-  await prisma.memberRole.deleteMany();
-  await prisma.identityAccount.deleteMany();
-  await prisma.session.deleteMany();
-  await prisma.authChallenge.deleteMany();
-  await prisma.auditLog.deleteMany();
-  await prisma.memberBadge.deleteMany();
-  await prisma.badge.deleteMany();
-  await prisma.hallOfFameSeason.deleteMany();
-  await prisma.importJob.deleteMany();
-  await prisma.appConfig.deleteMany();
-  await prisma.member.deleteMany();
-  await prisma.committee.deleteMany();
-  await prisma.season.deleteMany();
+  await db.orm.public.PointTransaction.where((row) => row.id.isNotNull()).deleteAndCount();
+  await db.orm.public.Attendance.where((row) => row.id.isNotNull()).deleteAndCount();
+  await db.orm.public.CommitteeActivityScore.where((row) => row.id.isNotNull()).deleteAndCount();
+  await db.orm.public.ActivityPublicIdHistory.where((row) => row.id.isNotNull()).deleteAndCount();
+  await db.orm.public.Activity.where((row) => row.id.isNotNull()).deleteAndCount();
+  await db.orm.public.MemberCommittee.where((row) => row.id.isNotNull()).deleteAndCount();
+  await db.orm.public.MemberRole.where((row) => row.id.isNotNull()).deleteAndCount();
+  await db.orm.public.IdentityAccount.where((row) => row.id.isNotNull()).deleteAndCount();
+  await db.orm.public.Session.where((row) => row.id.isNotNull()).deleteAndCount();
+  await db.orm.public.AuthChallenge.where((row) => row.id.isNotNull()).deleteAndCount();
+  await db.orm.public.AuditLog.where((row) => row.id.isNotNull()).deleteAndCount();
+  await db.orm.public.MemberBadge.where((row) => row.id.isNotNull()).deleteAndCount();
+  await db.orm.public.Badge.where((row) => row.id.isNotNull()).deleteAndCount();
+  await db.orm.public.HallOfFameSeason.where((row) => row.id.isNotNull()).deleteAndCount();
+  await db.orm.public.ImportJob.where((row) => row.id.isNotNull()).deleteAndCount();
+  await db.orm.public.AppConfig.where((row) => row.id.isNotNull()).deleteAndCount();
+  await db.orm.public.Member.where((row) => row.id.isNotNull()).deleteAndCount();
+  await db.orm.public.Committee.where((row) => row.id.isNotNull()).deleteAndCount();
+  await db.orm.public.Season.where((row) => row.id.isNotNull()).deleteAndCount();
 
-  await prisma.appConfig.createMany({
-    data: [
-      { key: "committee_credit_strategy", value: "FULL_CREDIT" },
-      { key: "timezone", value: "America/Bogota" },
-    ],
-  });
+  await db.orm.public.AppConfig.createAndCount([
+    { key: "committee_credit_strategy", value: "FULL_CREDIT" },
+    { key: "timezone", value: "America/Bogota" },
+  ]);
 
-  const committees = await Promise.all(
-    COMMITTEES.map((name, index) =>
-      prisma.committee.create({
-        data: {
-          name,
-          slug: slugify(name),
-          color: COLORS[index % COLORS.length],
-        },
-      })
-    )
+  const createdCommittees = await db.orm.public.Committee.createAll(
+    COMMITTEES.map((name, index) => ({
+      name,
+      slug: slugify(name),
+      color: COLORS[index % COLORS.length],
+    }))
   );
+  const committeeByName = new Map(
+    createdCommittees.map((committee) => [committee.name, committee])
+  );
+  const committees = COMMITTEES.map((name) => committeeByName.get(name)!);
 
-  const committeeByName = new Map(committees.map((committee) => [committee.name, committee]));
-
-  const season = await prisma.season.create({
-    data: {
-      name: "2026-2",
-      startDate: new Date("2026-07-01"),
-      endDate: new Date("2026-12-15"),
-      status: "ACTIVE",
-    },
+  const season = await db.orm.public.Season.create({
+    name: "2026-2",
+    startDate: toDateOnly("2026-07-01"),
+    endDate: toDateOnly("2026-12-15"),
+    status: "ACTIVE",
   });
 
-  const closedSeason = await prisma.season.create({
-    data: {
-      name: "2026-1",
-      startDate: new Date("2026-01-15"),
-      endDate: new Date("2026-06-15"),
-      status: "CLOSED",
-    },
+  const closedSeason = await db.orm.public.Season.create({
+    name: "2026-1",
+    startDate: toDateOnly("2026-01-15"),
+    endDate: toDateOnly("2026-06-15"),
+    status: "CLOSED",
   });
 
-  const admin = await prisma.member.create({
-    data: {
-      fullName: "Camila General",
-      institutionalEmail: `gh.general@${emailDomain}`,
-      memberType: "ACTIVE",
-      roles: {
-        create: [{ role: "ADMIN" }, { role: "MEMBER" }],
-      },
-      committees: {
-        create: { committeeId: committeeByName.get("GEMIS")!.id },
-      },
-    },
+  const seasonJoinAt = toIso(new Date("2026-07-01T00:00:00Z"));
+
+  const admin = await db.orm.public.Member.create({
+    fullName: "Camila General",
+    institutionalEmail: `gh.general@${emailDomain}`,
+    memberType: "ACTIVE",
+    roles: (roles) => roles.create([{ role: "ADMIN" }, { role: "MEMBER" }]),
+    committees: (memberships) =>
+      memberships.create({
+        committeeId: committeeByName.get("GEMIS")!.id,
+        joinedAt: seasonJoinAt,
+      }),
   });
 
   const members = [admin];
-  const gemisLeader = await prisma.member.create({
-    data: {
-      fullName: "Lina Lider",
-      institutionalEmail: `lider.gemis@${emailDomain}`,
-      memberType: "ACTIVE",
-      roles: {
-        create: [
-          { role: "MEMBER" },
-          { role: "COMMITTEE_LEADER", committeeId: committeeByName.get("GEMIS")!.id },
-        ],
-      },
-      committees: {
-        create: { committeeId: committeeByName.get("GEMIS")!.id },
-      },
-    },
+  const gemisLeader = await db.orm.public.Member.create({
+    fullName: "Lina Lider",
+    institutionalEmail: `lider.gemis@${emailDomain}`,
+    memberType: "ACTIVE",
+    roles: (roles) =>
+      roles.create([
+        { role: "MEMBER" },
+        { role: "COMMITTEE_LEADER", committeeId: committeeByName.get("GEMIS")!.id },
+      ]),
+    committees: (memberships) =>
+      memberships.create({
+        committeeId: committeeByName.get("GEMIS")!.id,
+        joinedAt: seasonJoinAt,
+      }),
   });
   members.push(gemisLeader);
   for (let i = 0; i < 50; i += 1) {
@@ -204,28 +194,46 @@ async function main() {
     const extra = LAST_NAMES[(i * 3) % LAST_NAMES.length]!;
     const fullName = `${first} ${last} ${extra}`;
     const memberType: MemberType = i % 4 === 0 ? "NEW" : "ACTIVE";
-    const committeeCount = i % 7 === 0 ? 3 : i % 5 === 0 ? 2 : i % 11 === 0 ? 0 : 1;
+    const status: MemberStatus = i === 3 ? "ON_LEAVE" : i === 7 ? "HONORARY" : "ACTIVE";
+    const committeeCount = i % 7 === 0 ? 3 : i % 5 === 0 ? 2 : 1;
     const start = i % committees.length;
-    const assigned = Array.from({ length: committeeCount }, (_, offset) => committees[(start + offset) % committees.length]!);
+    const assigned = Array.from(
+      { length: committeeCount },
+      (_, offset) => committees[(start + offset) % committees.length]!
+    );
 
-    const member = await prisma.member.create({
-      data: {
-        fullName,
-        institutionalEmail: `integrante.${String(i + 1).padStart(2, "0")}@${emailDomain}`,
-        memberType,
-        roles: {
-          create: [
-            { role: "MEMBER" },
-            ...(assigned[0] && i % 13 === 0
-              ? [{ role: "COMMITTEE_LEADER" as const, committeeId: assigned[0].id }]
-              : []),
-          ],
-        },
-        committees: {
-          create: assigned.map((committee) => ({ committeeId: committee.id })),
-        },
-      },
+    const member = await db.orm.public.Member.create({
+      fullName,
+      institutionalEmail: `integrante.${String(i + 1).padStart(2, "0")}@${emailDomain}`,
+      memberType,
+      status,
+      roles: (roles) =>
+        roles.create([
+          { role: "MEMBER" },
+          ...(assigned[0] && i % 13 === 0
+            ? [{ role: "COMMITTEE_LEADER" as const, committeeId: assigned[0].id }]
+            : []),
+        ]),
+      committees: (memberships) =>
+        memberships.create(
+          assigned.map((committee) => ({
+            committeeId: committee.id,
+            joinedAt: seasonJoinAt,
+          }))
+        ),
     });
+    if (i % 8 === 0) {
+      const previous = committees[(start + 8) % committees.length]!;
+      if (!assigned.some((committee) => committee.id === previous.id)) {
+        await db.orm.public.MemberCommittee.create({
+          memberId: member.id,
+          committeeId: previous.id,
+          joinedAt: toIso(new Date("2026-01-15T00:00:00Z")),
+          leftAt: toIso(new Date("2026-06-15T00:00:00Z")),
+          isActive: false,
+        });
+      }
+    }
     members.push(member);
   }
 
@@ -251,42 +259,42 @@ async function main() {
   for (const def of activityDefs) {
     const startsAt = daysFromNow(def.offset, 18);
     const isOpen = def.status === "OPEN";
-    const activity = await prisma.activity.create({
-      data: {
-        publicId: createPublicId(),
-        seasonId: season.id,
-        name: def.name,
-        description: `${def.name} — actividad de temporada ${season.name}.`,
-        activityType: def.type,
-        startsAt,
-        registrationStart: isOpen ? new Date(Date.now() - 24 * 60 * 60 * 1000) : new Date(startsAt.getTime() - 3 * 60 * 60 * 1000),
-        registrationEnd: isOpen ? new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) : new Date(startsAt.getTime() + 3 * 60 * 60 * 1000),
-        individualPoints: def.points,
-        approvalMode: def.approvalMode,
-        status: def.status,
-        createdById: admin.id,
-      },
+    const activity = await db.orm.public.Activity.create({
+      publicId: createPublicId(),
+      seasonId: season.id,
+      name: def.name,
+      description: `${def.name} — actividad de temporada ${season.name}.`,
+      activityType: def.type,
+      startsAt: toIso(startsAt),
+      registrationStart: isOpen
+        ? isoNow(new Date(Date.now() - 24 * 60 * 60 * 1000))
+        : toIso(new Date(startsAt.getTime() - 3 * 60 * 60 * 1000)),
+      registrationEnd: isOpen
+        ? isoNow(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000))
+        : toIso(new Date(startsAt.getTime() + 3 * 60 * 60 * 1000)),
+      individualPoints: def.points,
+      approvalMode: def.approvalMode,
+      status: def.status,
+      createdById: admin.id,
     });
     activities.push(activity);
   }
 
-  await prisma.activity.create({
-    data: {
-      publicId: createPublicId(),
-      seasonId: season.id,
-      name: "Taller propuesto GEMIS",
-      description: "Propuesta de líder de comité, pendiente de publicación.",
-      activityType: "WORKSHOP",
-      startsAt: daysFromNow(10, 18),
-      registrationStart: daysFromNow(8, 8),
-      registrationEnd: daysFromNow(10, 21),
-      individualPoints: 15,
-      approvalMode: "AUTO",
-      status: "DRAFT",
-      needsApproval: true,
-      committeeId: committeeByName.get("GEMIS")!.id,
-      createdById: gemisLeader.id,
-    },
+  await db.orm.public.Activity.create({
+    publicId: createPublicId(),
+    seasonId: season.id,
+    name: "Taller propuesto GEMIS",
+    description: "Propuesta de líder de comité, pendiente de publicación.",
+    activityType: "WORKSHOP",
+    startsAt: toIso(daysFromNow(10, 18)),
+    registrationStart: toIso(daysFromNow(8, 8)),
+    registrationEnd: toIso(daysFromNow(10, 21)),
+    individualPoints: 15,
+    approvalMode: "AUTO",
+    status: "DRAFT",
+    needsApproval: true,
+    committeeId: committeeByName.get("GEMIS")!.id,
+    createdById: gemisLeader.id,
   });
 
   const pastActivities = activities.filter((activity) =>
@@ -298,75 +306,65 @@ async function main() {
     for (const [index, member] of sample.entries()) {
       const status: AttendanceStatus =
         activity.approvalMode === "MANUAL" && index % 8 === 0 ? "PENDING" : "APPROVED";
-      const attendance = await prisma.attendance.create({
-        data: {
-          activityId: activity.id,
-          memberId: member.id,
-          status,
-          source: index % 2 === 0 ? AttendanceSource.QR : AttendanceSource.LINK,
-          registeredAt: new Date(activity.startsAt.getTime() + index * 60000),
-          approvedAt: status === "APPROVED" ? activity.startsAt : null,
-          approvedById: status === "APPROVED" ? admin.id : null,
-        },
+      const attendance = await db.orm.public.Attendance.create({
+        activityId: activity.id,
+        memberId: member.id,
+        status,
+        source: index % 2 === 0 ? "QR" : "LINK",
+        registeredAt: toIso(new Date(new Date(activity.startsAt).getTime() + index * 60000)),
+        approvedAt: status === "APPROVED" ? activity.startsAt : null,
+        approvedById: status === "APPROVED" ? admin.id : null,
       });
 
       if (status === "APPROVED") {
-        await prisma.pointTransaction.create({
-          data: {
-            memberId: member.id,
-            seasonId: season.id,
-            activityId: activity.id,
-            attendanceId: attendance.id,
-            points: activity.individualPoints,
-            type: "ACTIVITY",
-            reason: `Asistencia: ${activity.name}`,
-            createdById: admin.id,
-            createdAt: attendance.registeredAt,
-          },
+        await db.orm.public.PointTransaction.create({
+          memberId: member.id,
+          seasonId: season.id,
+          activityId: activity.id,
+          attendanceId: attendance.id,
+          points: activity.individualPoints,
+          type: "ACTIVITY",
+          reason: `Asistencia: ${activity.name}`,
+          createdById: admin.id,
+          createdAt: attendance.registeredAt,
         });
       }
     }
     await recomputeActivityScores(activity.id);
   }
 
-  await prisma.pointTransaction.create({
-    data: {
-      memberId: members[2]!.id,
-      seasonId: season.id,
-      points: 30,
-      type: "BONUS",
-      reason: "Apoyo logístico en Athletic",
-      createdById: admin.id,
-    },
+  await db.orm.public.PointTransaction.create({
+    memberId: members[2]!.id,
+    seasonId: season.id,
+    points: 30,
+    type: "BONUS",
+    reason: "Apoyo logístico en Athletic",
+    createdById: admin.id,
   });
 
-  await prisma.badge.createMany({
-    data: [
-      { slug: "streak", name: "Racha", description: "Tres actividades consecutivas", type: "STREAK" },
-      { slug: "500-points", name: "500 GH Points", description: "Alcanza 500 puntos en la temporada", type: "POINTS" },
-      { slug: "top-10", name: "Top 10", description: "Termina en el top 10 de tu tablero", type: "TOP" },
-      { slug: "monthly-mvp", name: "MVP del mes", description: "Más GH Points del mes", type: "MVP" },
-      { slug: "committee-leader", name: "Líder de comité", description: "Lideras un comité", type: "LEADER" },
+  await db.orm.public.Badge.createAndCount([
+    { slug: "streak", name: "Racha", description: "Tres actividades consecutivas", type: "STREAK" },
+    { slug: "500-points", name: "500 GH Points", description: "Alcanza 500 puntos en la temporada", type: "POINTS" },
+    { slug: "top-10", name: "Top 10", description: "Termina en el top 10 de tu tablero", type: "TOP" },
+    { slug: "monthly-mvp", name: "MVP del mes", description: "Más GH Points del mes", type: "MVP" },
+    { slug: "committee-leader", name: "Líder de comité", description: "Lideras un comité", type: "LEADER" },
+  ]);
+
+  await db.orm.public.HallOfFameSeason.create({
+    seasonId: closedSeason.id,
+    top3Active: [
+      { fullName: "Camila General", total: 120, rank: 1 },
+      { fullName: "Lina Lider", total: 90, rank: 2 },
+      { fullName: "Ana Demo", total: 80, rank: 3 },
     ],
-  });
-
-  await prisma.hallOfFameSeason.create({
-    data: {
-      seasonId: closedSeason.id,
-      top3Active: [
-        { fullName: "Camila General", total: 120, rank: 1 },
-        { fullName: "Lina Lider", total: 90, rank: 2 },
-        { fullName: "Ana Demo", total: 80, rank: 3 },
-      ],
-      top3New: [{ fullName: "Sofia Nueva", total: 40, rank: 1 }],
-      top3Committees: [{ name: "GEMIS", slug: "gemis", total: 0.42, rank: 1 }],
-      stats: {
-        activeMembers: 40,
-        newMembers: 12,
-        activities: 8,
-        attendances: 96,
-        pointsAwarded: 1400,
-      },
+    top3New: [{ fullName: "Sofia Nueva", total: 40, rank: 1 }],
+    top3Committees: [{ name: "GEMIS", slug: "gemis", total: 0.42, rank: 1 }],
+    stats: {
+      activeMembers: 40,
+      newMembers: 12,
+      activities: 8,
+      attendances: 96,
+      pointsAwarded: 1400,
     },
   });
 
@@ -375,13 +373,10 @@ async function main() {
   console.info(`Seed OK. Admin: gh.general@${emailDomain} (OTP_FIXED_CODE en desarrollo)`);
   console.info(`Líder GEMIS: lider.gemis@${emailDomain}`);
   console.info(`Integrantes: ${members.length}. Actividades: ${activities.length}.`);
+  await db.close();
 }
 
-main()
-  .catch((error) => {
-    console.error(error);
-    process.exit(1);
-  })
-  .finally(async () => {
-    await prisma.$disconnect();
-  });
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

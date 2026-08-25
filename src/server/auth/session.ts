@@ -2,9 +2,11 @@ import "server-only";
 
 import { cookies } from "next/headers";
 import { cache } from "react";
-import { prisma } from "@/server/db/prisma";
+import { db } from "@/server/db/prisma";
+import { isPast } from "@/server/db/time";
 import { getEnv } from "@/server/config/env";
 import type { Actor } from "@/server/domain/authorization";
+import { canAuthenticate } from "@/server/domain/members-pure";
 import { SESSION_COOKIE } from "@/lib/constants";
 import { generateSessionToken, hashSecret } from "@/server/auth/secrets";
 import { schedulePruneExpiredAuthRows } from "@/server/auth/prune";
@@ -19,48 +21,45 @@ export async function createSession(input: {
 }) {
   const token = generateSessionToken();
   const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
-  await prisma.session.create({
-    data: {
-      memberId: input.memberId,
-      tokenHash: hashSecret(token),
-      expiresAt,
-      userAgent: input.userAgent ?? null,
-      ip: input.ip ?? null,
-    },
+  await db.orm.public.Session.create({
+    memberId: input.memberId,
+    tokenHash: hashSecret(token),
+    expiresAt: expiresAt.toISOString(),
+    userAgent: input.userAgent ?? null,
+    ip: input.ip ?? null,
   });
   schedulePruneExpiredAuthRows();
   return { token, expiresAt };
 }
 
 export async function destroySession(token: string) {
-  await prisma.session.deleteMany({
-    where: { tokenHash: hashSecret(token) },
-  });
+  await db.orm.public.Session.where({ tokenHash: hashSecret(token) }).deleteAndCount();
 }
 
 export async function destroyMemberSessions(memberId: string) {
-  await prisma.session.deleteMany({ where: { memberId } });
+  await db.orm.public.Session.where({ memberId }).deleteAndCount();
 }
 
 async function readActorFromToken(token: string): Promise<Actor | null> {
-  const session = await prisma.session.findUnique({
-    where: { tokenHash: hashSecret(token) },
-    include: {
-      member: {
-        include: { roles: true },
-      },
-    },
-  });
+  const session = await db.orm.public.Session.where({ tokenHash: hashSecret(token) })
+    .include("member", (member) =>
+      member
+        .select("id", "fullName", "institutionalEmail", "memberType", "status")
+        .include("roles", (roles) => roles.select("role", "committeeId"))
+    )
+    .first();
 
-  if (!session || session.expiresAt < new Date()) {
+  if (!session || isPast(session.expiresAt)) {
     if (session) {
-      await prisma.session.delete({ where: { id: session.id } }).catch(() => undefined);
+      await db.orm.public.Session.where({ id: session.id })
+        .delete()
+        .catch(() => undefined);
     }
     return null;
   }
 
-  if (session.member.status !== "ACTIVE") {
-    await prisma.session.deleteMany({ where: { memberId: session.memberId } });
+  if (!canAuthenticate(session.member.status)) {
+    await db.orm.public.Session.where({ memberId: session.memberId }).deleteAndCount();
     return null;
   }
 

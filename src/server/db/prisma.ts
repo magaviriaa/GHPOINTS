@@ -1,16 +1,3 @@
-import { PrismaClient } from "@prisma/client";
+import { db, type Db, type Tx } from "@/prisma/db";
 
-// SAFETY: Next.js HMR reuses this process; the Prisma client must be a singleton on globalThis.
-const globalForPrisma = globalThis as typeof globalThis & {
-  prisma?: PrismaClient;
-};
-
-export const prisma =
-  globalForPrisma.prisma ??
-  new PrismaClient({
-    log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
-  });
-
-if (process.env.NODE_ENV !== "production") {
-  globalForPrisma.prisma = prisma;
-}
+export { db, type Db, type Tx };

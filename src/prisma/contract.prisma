@@ -1,37 +1,42 @@
-generator client {
-  provider = "prisma-client-js"
-}
-
-datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
-}
+// use prisma-next
 
 enum MemberType {
   NEW
   ACTIVE
+
+  @@map("MemberType")
 }
 
 enum MemberStatus {
   ACTIVE
+  ON_LEAVE
+  HONORARY
   INACTIVE
+
+  @@map("MemberStatus")
 }
 
 enum RoleCode {
   MEMBER
   COMMITTEE_LEADER
   ADMIN
+
+  @@map("RoleCode")
 }
 
 enum CommitteeStatus {
   ACTIVE
   INACTIVE
+
+  @@map("CommitteeStatus")
 }
 
 enum SeasonStatus {
   UPCOMING
   ACTIVE
   CLOSED
+
+  @@map("SeasonStatus")
 }
 
 enum ActivityStatus {
@@ -40,6 +45,8 @@ enum ActivityStatus {
   CLOSED
   PROCESSED
   CANCELLED
+
+  @@map("ActivityStatus")
 }
 
 enum ActivityType {
@@ -49,15 +56,21 @@ enum ActivityType {
   WORKSHOP
   SOCIAL
   OTHER
+
+  @@map("ActivityType")
 }
 
 enum AttendanceMode {
   OPEN_LINK
+
+  @@map("AttendanceMode")
 }
 
 enum ApprovalMode {
   AUTO
   MANUAL
+
+  @@map("ApprovalMode")
 }
 
 enum AttendanceStatus {
@@ -65,6 +78,8 @@ enum AttendanceStatus {
   APPROVED
   REJECTED
   CANCELLED
+
+  @@map("AttendanceStatus")
 }
 
 enum AttendanceSource {
@@ -73,6 +88,8 @@ enum AttendanceSource {
   ADMIN
   IMPORT
   MICROSOFT_FORMS
+
+  @@map("AttendanceSource")
 }
 
 enum PointTransactionType {
@@ -81,21 +98,29 @@ enum PointTransactionType {
   BONUS
   PENALTY
   REVERSAL
+
+  @@map("PointTransactionType")
 }
 
 enum AuthProvider {
   EMAIL_OTP
   MICROSOFT_ENTRA
+
+  @@map("AuthProvider")
 }
 
 enum AuthChallengeKind {
   OTP
   MAGIC_LINK
+
+  @@map("AuthChallengeKind")
 }
 
 enum CommitteeCreditStrategy {
   FULL_CREDIT
   FRACTIONAL_CREDIT
+
+  @@map("CommitteeCreditStrategy")
 }
 
 enum BadgeType {
@@ -104,23 +129,25 @@ enum BadgeType {
   TOP
   MVP
   LEADER
+
+  @@map("BadgeType")
 }
 
 model Member {
-  id                 String       @id @default(cuid())
+  id                 String       @id @default(cuid(2))
   fullName           String
   institutionalEmail String       @unique
   memberType         MemberType   @default(NEW)
   status             MemberStatus @default(ACTIVE)
-  createdAt          DateTime     @default(now())
-  updatedAt          DateTime     @updatedAt
+  createdAt          TimestamptzString     @default(now())
+  updatedAt          temporal.updatedAtString()
 
   identityAccounts    IdentityAccount[]
   roles               MemberRole[]
   committees          MemberCommittee[]
-  attendances         Attendance[]
+  attendances         Attendance[]       @relation("AttendanceMember")
   approvedAttendances Attendance[]       @relation("AttendanceApprovedBy")
-  pointTransactions   PointTransaction[]
+  pointTransactions   PointTransaction[] @relation("PointTransactionMember")
   createdActivities   Activity[]         @relation("ActivityCreatedBy")
   createdPointTx      PointTransaction[] @relation("PointTransactionCreatedBy")
   sessions            Session[]
@@ -131,45 +158,48 @@ model Member {
 
   @@index([status, memberType])
   @@index([fullName])
+  @@map("Member")
 }
 
 model IdentityAccount {
-  id             String       @id @default(cuid())
+  id             String       @id @default(cuid(2))
   memberId       String
   member         Member       @relation(fields: [memberId], references: [id], onDelete: Restrict)
   provider       AuthProvider
   providerUserId String
   microsoftOid   String?
   microsoftTid   String?
-  lastLoginAt    DateTime?
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
+  lastLoginAt    TimestamptzString?
+  createdAt      TimestamptzString     @default(now())
+  updatedAt      temporal.updatedAtString()
 
   @@unique([provider, providerUserId])
   @@index([memberId])
+  @@map("IdentityAccount")
 }
 
 model MemberRole {
-  id          String     @id @default(cuid())
+  id          String     @id @default(cuid(2))
   memberId    String
   member      Member     @relation(fields: [memberId], references: [id], onDelete: Restrict)
   role        RoleCode
   committeeId String?
   committee   Committee? @relation(fields: [committeeId], references: [id], onDelete: Restrict)
-  createdAt   DateTime   @default(now())
+  createdAt   TimestamptzString   @default(now())
 
   @@index([memberId, role])
   @@index([role])
+  @@map("MemberRole")
 }
 
 model Committee {
-  id        String          @id @default(cuid())
+  id        String          @id @default(cuid(2))
   name      String
   slug      String          @unique
   status    CommitteeStatus @default(ACTIVE)
   color     String          @default("#1e3a5f")
-  createdAt DateTime        @default(now())
-  updatedAt DateTime        @updatedAt
+  createdAt TimestamptzString        @default(now())
+  updatedAt temporal.updatedAtString()
 
   memberships MemberCommittee[]
   scores      CommitteeActivityScore[]
@@ -177,64 +207,66 @@ model Committee {
   activities  Activity[]
 
   @@index([status])
+  @@map("Committee")
 }
 
 model MemberCommittee {
-  id          String    @id @default(cuid())
+  id          String    @id @default(cuid(2))
   memberId    String
   member      Member    @relation(fields: [memberId], references: [id], onDelete: Restrict)
   committeeId String
   committee   Committee @relation(fields: [committeeId], references: [id], onDelete: Restrict)
-  joinedAt    DateTime  @default(now())
-  leftAt      DateTime?
+  joinedAt    TimestamptzString  @default(now())
+  leftAt      TimestamptzString?
   isActive    Boolean   @default(true)
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  createdAt   TimestamptzString  @default(now())
+  updatedAt   temporal.updatedAtString()
 
   @@index([committeeId, isActive])
   @@index([memberId, isActive])
+  @@map("MemberCommittee")
 }
 
 model Season {
-  id        String       @id @default(cuid())
+  id        String       @id @default(cuid(2))
   name      String
-  startDate DateTime     @db.Date
-  endDate   DateTime     @db.Date
+  startDate DateString
+  endDate   DateString
   status    SeasonStatus @default(UPCOMING)
-  createdAt DateTime     @default(now())
-  updatedAt DateTime     @updatedAt
+  createdAt TimestamptzString     @default(now())
+  updatedAt temporal.updatedAtString()
 
   activities        Activity[]
   pointTransactions PointTransaction[]
-  hallOfFame        HallOfFameSeason?
 
   @@index([status])
+  @@map("Season")
 }
 
 model Activity {
-  id                      String         @id @default(cuid())
-  publicId                String         @unique
-  seasonId                String
-  season                  Season         @relation(fields: [seasonId], references: [id], onDelete: Restrict)
-  name                    String
-  description             String?
-  activityType            ActivityType   @default(GENERAL)
-  startsAt                DateTime
-  registrationStart       DateTime
-  registrationEnd         DateTime
-  individualPoints        Int
-  attendanceMode          AttendanceMode @default(OPEN_LINK)
-  approvalMode            ApprovalMode   @default(AUTO)
-  status                  ActivityStatus @default(DRAFT)
-  committeeId             String?
-  committee               Committee?     @relation(fields: [committeeId], references: [id], onDelete: Restrict)
-  needsApproval           Boolean        @default(false)
-  requireAttendanceToken  Boolean        @default(false)
-  attendanceTokenHash     String?
-  createdById             String
-  createdBy               Member         @relation("ActivityCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
-  createdAt               DateTime       @default(now())
-  updatedAt               DateTime       @updatedAt
+  id                     String         @id @default(cuid(2))
+  publicId               String         @unique
+  seasonId               String
+  season                 Season         @relation(fields: [seasonId], references: [id], onDelete: Restrict)
+  name                   String
+  description            String?
+  activityType           ActivityType   @default(GENERAL)
+  startsAt               TimestamptzString
+  registrationStart      TimestamptzString
+  registrationEnd        TimestamptzString
+  individualPoints       Int
+  attendanceMode         AttendanceMode @default(OPEN_LINK)
+  approvalMode           ApprovalMode   @default(AUTO)
+  status                 ActivityStatus @default(DRAFT)
+  committeeId            String?
+  committee              Committee?     @relation(fields: [committeeId], references: [id], onDelete: Restrict)
+  needsApproval          Boolean        @default(false)
+  requireAttendanceToken Boolean        @default(false)
+  attendanceTokenHash    String?
+  createdById            String
+  createdBy              Member         @relation("ActivityCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt              TimestamptzString       @default(now())
+  updatedAt              temporal.updatedAtString()
 
   attendances       Attendance[]
   scores            CommitteeActivityScore[]
@@ -246,192 +278,207 @@ model Activity {
   @@index([status, registrationStart, registrationEnd])
   @@index([needsApproval, status])
   @@index([committeeId])
+  @@map("Activity")
 }
 
 model ActivityPublicIdHistory {
-  id         String   @id @default(cuid())
+  id         String   @id @default(cuid(2))
   activityId String
   activity   Activity @relation(fields: [activityId], references: [id], onDelete: Cascade)
   publicId   String
-  retiredAt  DateTime @default(now())
+  retiredAt  TimestamptzString @default(now())
 
   @@index([activityId])
   @@index([publicId])
+  @@map("ActivityPublicIdHistory")
 }
 
 model Attendance {
-  id           String           @id @default(cuid())
+  id           String           @id @default(cuid(2))
   activityId   String
   activity     Activity         @relation(fields: [activityId], references: [id], onDelete: Restrict)
   memberId     String
-  member       Member           @relation(fields: [memberId], references: [id], onDelete: Restrict)
+  member       Member           @relation("AttendanceMember", fields: [memberId], references: [id], onDelete: Restrict)
   status       AttendanceStatus @default(PENDING)
-  registeredAt DateTime         @default(now())
-  approvedAt   DateTime?
+  registeredAt TimestamptzString         @default(now())
+  approvedAt   TimestamptzString?
   approvedById String?
   approvedBy   Member?          @relation("AttendanceApprovedBy", fields: [approvedById], references: [id], onDelete: Restrict)
   source       AttendanceSource @default(LINK)
-  cancelledAt  DateTime?
+  cancelledAt  TimestamptzString?
   cancelReason String?
-  createdAt    DateTime         @default(now())
-  updatedAt    DateTime         @updatedAt
+  createdAt    TimestamptzString         @default(now())
+  updatedAt    temporal.updatedAtString()
 
   pointTransactions PointTransaction[]
 
   @@unique([activityId, memberId])
   @@index([memberId])
   @@index([activityId, status])
+  @@map("Attendance")
 }
 
 model PointTransaction {
-  id           String                @id @default(cuid())
+  id           String               @id @default(cuid(2))
   memberId     String
-  member       Member                @relation(fields: [memberId], references: [id], onDelete: Restrict)
+  member       Member               @relation("PointTransactionMember", fields: [memberId], references: [id], onDelete: Restrict)
   seasonId     String
-  season       Season                @relation(fields: [seasonId], references: [id], onDelete: Restrict)
+  season       Season               @relation(fields: [seasonId], references: [id], onDelete: Restrict)
   activityId   String?
-  activity     Activity?             @relation(fields: [activityId], references: [id], onDelete: Restrict)
+  activity     Activity?            @relation(fields: [activityId], references: [id], onDelete: Restrict)
   attendanceId String?
-  attendance   Attendance?           @relation(fields: [attendanceId], references: [id], onDelete: Restrict)
+  attendance   Attendance?          @relation(fields: [attendanceId], references: [id], onDelete: Restrict)
   points       Int
   type         PointTransactionType
   reason       String
   createdById  String?
-  createdBy    Member?               @relation("PointTransactionCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
-  createdAt    DateTime              @default(now())
-  reversalOfId String?               @unique
-  reversalOf   PointTransaction?     @relation("PointReversal", fields: [reversalOfId], references: [id], onDelete: Restrict)
-  reversedBy   PointTransaction?     @relation("PointReversal")
+  createdBy    Member?              @relation("PointTransactionCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt    TimestamptzString             @default(now())
+  reversalOfId String?              @unique
+  reversalOf   PointTransaction?    @relation("PointReversal", fields: [reversalOfId], references: [id], onDelete: Restrict)
 
   @@index([seasonId, memberId])
   @@index([seasonId, createdAt])
   @@index([memberId, createdAt])
   @@index([activityId])
   @@index([attendanceId])
+  @@map("PointTransaction")
 }
 
 model CommitteeActivityScore {
-  id                  String                   @id @default(cuid())
+  id                  String                  @id @default(cuid(2))
   committeeId         String
-  committee           Committee                @relation(fields: [committeeId], references: [id], onDelete: Restrict)
+  committee           Committee               @relation(fields: [committeeId], references: [id], onDelete: Restrict)
   activityId          String
-  activity            Activity                 @relation(fields: [activityId], references: [id], onDelete: Restrict)
+  activity            Activity                @relation(fields: [activityId], references: [id], onDelete: Restrict)
   seasonId            String
   eligibleMemberCount Int
-  attendeeCredit      Decimal                  @db.Decimal(12, 6)
-  participationRate   Decimal                  @db.Decimal(12, 6)
+  attendeeCredit      Decimal
+  participationRate   Decimal
   creditStrategy      CommitteeCreditStrategy
-  frozen              Boolean                  @default(false)
-  computedAt          DateTime                 @default(now())
-  updatedAt           DateTime                 @updatedAt
+  frozen              Boolean                 @default(false)
+  computedAt          TimestamptzString                @default(now())
+  updatedAt           temporal.updatedAtString()
 
   @@unique([committeeId, activityId])
   @@index([seasonId, committeeId])
+  @@map("CommitteeActivityScore")
 }
 
 model AuditLog {
-  id         String   @id @default(cuid())
+  id         String   @id @default(cuid(2))
   actorId    String?
   actor      Member?  @relation(fields: [actorId], references: [id], onDelete: SetNull)
   action     String
   entityType String
   entityId   String
-  before     Json?
-  after      Json?
+  before     Jsonb? // objects/arrays only; a JSON string primitive fails decode
+  after      Jsonb?
   ip         String?
-  createdAt  DateTime @default(now())
+  createdAt  TimestamptzString @default(now())
 
   @@index([createdAt])
   @@index([actorId])
   @@index([entityType, entityId])
+  @@map("AuditLog")
 }
 
 model AppConfig {
-  id          String   @id @default(cuid())
+  id          String   @id @default(cuid(2))
   key         String   @unique
-  value       Json
-  updatedAt   DateTime @updatedAt
+  value       String
+  updatedAt   temporal.updatedAtString()
   updatedById String?
   updatedBy   Member?  @relation("AppConfigUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
+
+  @@map("AppConfig")
 }
 
 model AuthChallenge {
-  id          String            @id @default(cuid())
+  id          String            @id @default(cuid(2))
   email       String
   kind        AuthChallengeKind @default(OTP)
   codeHash    String
-  expiresAt   DateTime
-  consumedAt  DateTime?
+  expiresAt   TimestamptzString
+  consumedAt  TimestamptzString?
   attempts    Int               @default(0)
   maxAttempts Int               @default(5)
   ip          String?
-  createdAt   DateTime          @default(now())
+  createdAt   TimestamptzString          @default(now())
 
   @@index([email, createdAt])
   @@index([email, kind, consumedAt])
   @@index([ip, createdAt])
+  @@map("AuthChallenge")
 }
 
 model Session {
-  id        String   @id @default(cuid())
+  id        String   @id @default(cuid(2))
   memberId  String
   member    Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
   tokenHash String   @unique
-  expiresAt DateTime
+  expiresAt TimestamptzString
   userAgent String?
   ip        String?
-  createdAt DateTime @default(now())
+  createdAt TimestamptzString @default(now())
 
   @@index([memberId])
   @@index([expiresAt])
+  @@map("Session")
 }
 
 model Badge {
-  id          String      @id @default(cuid())
-  slug        String      @unique
+  id          String        @id @default(cuid(2))
+  slug        String        @unique
   name        String
   description String
   type        BadgeType
-  createdAt   DateTime    @default(now())
+  createdAt   TimestamptzString      @default(now())
   members     MemberBadge[]
+
+  @@map("Badge")
 }
 
 model MemberBadge {
-  id        String   @id @default(cuid())
+  id        String   @id @default(cuid(2))
   memberId  String
   member    Member   @relation(fields: [memberId], references: [id], onDelete: Restrict)
   badgeId   String
   badge     Badge    @relation(fields: [badgeId], references: [id], onDelete: Restrict)
-  awardedAt DateTime @default(now())
+  awardedAt TimestamptzString @default(now())
   seasonId  String?
   periodKey String   @default("")
 
   @@unique([memberId, badgeId, seasonId, periodKey])
+  @@map("MemberBadge")
 }
 
 model HallOfFameSeason {
-  id                String   @id @default(cuid())
-  seasonId          String   @unique
-  season            Season   @relation(fields: [seasonId], references: [id], onDelete: Restrict)
+  id                String @id @default(cuid(2))
+  seasonId          String @unique
+  season            Season @relation(fields: [seasonId], references: [id], onDelete: Restrict)
   activeWinnerId    String?
   newWinnerId       String?
   committeeWinnerId String?
-  top3Active        Json
-  top3New           Json
-  top3Committees    Json
-  stats             Json
-  createdAt         DateTime @default(now())
+  top3Active        Jsonb // objects/arrays only; a JSON string primitive fails decode
+  top3New           Jsonb
+  top3Committees    Jsonb
+  stats             Jsonb
+  createdAt         TimestamptzString @default(now())
+
+  @@map("HallOfFameSeason")
 }
 
 model ImportJob {
-  id          String   @id @default(cuid())
+  id          String   @id @default(cuid(2))
   type        String
   status      String
   filename    String
-  summary     Json?
+  summary     Jsonb? // objects/arrays only; a JSON string primitive fails decode
   createdById String
   createdBy   Member   @relation(fields: [createdById], references: [id], onDelete: Restrict)
-  createdAt   DateTime @default(now())
+  createdAt   TimestamptzString @default(now())
 
   @@index([createdAt])
+  @@map("ImportJob")
 }

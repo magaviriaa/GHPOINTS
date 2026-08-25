@@ -1,6 +1,7 @@
 import "dotenv/config";
-import { PrismaClient } from "@prisma/client";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { db } from "@/server/db/prisma";
+import { toDateOnly, toIso } from "@/server/db/time";
 import { assertAttendanceTransition } from "@/server/domain/attendance-credit";
 import { decideAttendance } from "@/server/domain/attendance";
 import { DomainError, ErrorCodes, isDomainError } from "@/server/domain/errors";
@@ -9,7 +10,6 @@ import type { Actor } from "@/server/domain/authorization";
 const shouldRun = Boolean(process.env.DATABASE_URL?.startsWith("postgres"));
 
 describe.skipIf(!shouldRun)("Asistencia credit (db)", () => {
-  const prisma = new PrismaClient();
   const stamp = Date.now();
   let memberId = "";
   let activityId = "";
@@ -29,97 +29,88 @@ describe.skipIf(!shouldRun)("Asistencia credit (db)", () => {
   }
 
   beforeAll(async () => {
-    await prisma.$connect();
-    const member = await prisma.member.create({
-      data: {
-        fullName: "Credit Test Admin",
-        institutionalEmail: `credit-admin-${stamp}@example.test`,
-        memberType: "ACTIVE",
-      },
+    const member = await db.orm.public.Member.create({
+      fullName: "Credit Test Admin",
+      institutionalEmail: `credit-admin-${stamp}@example.test`,
+      memberType: "ACTIVE",
     });
     memberId = member.id;
 
-    const season = await prisma.season.create({
-      data: {
-        name: `Credit test ${stamp}`,
-        startDate: new Date("2026-01-01"),
-        endDate: new Date("2026-12-31"),
-        status: "UPCOMING",
-      },
+    const season = await db.orm.public.Season.create({
+      name: `Credit test ${stamp}`,
+      startDate: toDateOnly("2026-01-01"),
+      endDate: toDateOnly("2026-12-31"),
+      status: "UPCOMING",
     });
     seasonId = season.id;
 
-    const activity = await prisma.activity.create({
-      data: {
-        publicId: `cred${stamp}`,
-        seasonId: season.id,
-        name: "Credit activity",
-        startsAt: new Date("2026-06-01T18:00:00Z"),
-        registrationStart: new Date("2026-05-01T00:00:00Z"),
-        registrationEnd: new Date("2026-06-02T00:00:00Z"),
-        individualPoints: 20,
-        status: "OPEN",
-        createdById: member.id,
-      },
+    const activity = await db.orm.public.Activity.create({
+      publicId: `cred${stamp}`,
+      seasonId: season.id,
+      name: "Credit activity",
+      startsAt: toIso(new Date("2026-06-01T18:00:00Z")),
+      registrationStart: toIso(new Date("2026-05-01T00:00:00Z")),
+      registrationEnd: toIso(new Date("2026-06-02T00:00:00Z")),
+      individualPoints: 20,
+      status: "OPEN",
+      createdById: member.id,
     });
     activityId = activity.id;
 
-    const attendance = await prisma.attendance.create({
-      data: {
-        activityId: activity.id,
-        memberId: member.id,
-        status: "PENDING",
-        source: "ADMIN",
-      },
+    const attendance = await db.orm.public.Attendance.create({
+      activityId: activity.id,
+      memberId: member.id,
+      status: "PENDING",
+      source: "ADMIN",
     });
     attendanceId = attendance.id;
   });
 
   afterAll(async () => {
     if (activityId) {
-      await prisma.committeeActivityScore.deleteMany({ where: { activityId } });
+      await db.orm.public.CommitteeActivityScore.where({ activityId }).deleteAndCount();
     }
     if (attendanceId) {
-      await prisma.pointTransaction.deleteMany({ where: { attendanceId } });
-      await prisma.attendance.deleteMany({ where: { id: attendanceId } });
+      await db.orm.public.PointTransaction.where({ attendanceId }).deleteAndCount();
+      await db.orm.public.Attendance.where({ id: attendanceId }).deleteAndCount();
     }
     if (activityId) {
-      await prisma.activity.deleteMany({ where: { id: activityId } });
+      await db.orm.public.Activity.where({ id: activityId }).deleteAndCount();
     }
     if (seasonId) {
-      await prisma.season.deleteMany({ where: { id: seasonId } });
+      await db.orm.public.Season.where({ id: seasonId }).deleteAndCount();
     }
     if (memberId) {
-      await prisma.memberBadge.deleteMany({ where: { memberId } });
-      await prisma.auditLog.deleteMany({ where: { actorId: memberId } });
-      await prisma.member.deleteMany({ where: { id: memberId } });
+      await db.orm.public.MemberBadge.where({ memberId }).deleteAndCount();
+      await db.orm.public.AuditLog.where({ actorId: memberId }).deleteAndCount();
+      await db.orm.public.Member.where({ id: memberId }).deleteAndCount();
     }
-    await prisma.$disconnect();
   });
 
   it("posts ACTIVITY credit once, reverses on reject, and blocks re-approval", async () => {
     await decideAttendance({ actor: actor(), attendanceIds: [attendanceId], to: "APPROVED" });
 
-    const first = await prisma.pointTransaction.findMany({
-      where: { attendanceId, type: "ACTIVITY" },
-    });
+    const first = await db.orm.public.PointTransaction.where({
+      attendanceId,
+      type: "ACTIVITY",
+    }).all();
     expect(first).toHaveLength(1);
     expect(first[0]?.points).toBe(20);
 
     await decideAttendance({ actor: actor(), attendanceIds: [attendanceId], to: "APPROVED" });
-    const second = await prisma.pointTransaction.findMany({
-      where: { attendanceId, type: "ACTIVITY" },
-    });
+    const second = await db.orm.public.PointTransaction.where({
+      attendanceId,
+      type: "ACTIVITY",
+    }).all();
     expect(second).toHaveLength(1);
 
     await decideAttendance({ actor: actor(), attendanceIds: [attendanceId], to: "REJECTED" });
-    const net = await prisma.pointTransaction.aggregate({
-      where: { attendanceId },
-      _sum: { points: true },
-    });
-    expect(net._sum.points).toBe(0);
+    const net = await db.orm.public.PointTransaction.where({ attendanceId }).aggregate((agg) => ({
+      points: agg.sum("points"),
+    }));
+    expect(net.points).toBe(0);
 
-    const attendance = await prisma.attendance.findUnique({ where: { id: attendanceId } });
+    const attendance = await db.orm.public.Attendance.first({ id: attendanceId });
     expect(attendance?.status).toBe("REJECTED");
     expect(() => assertAttendanceTransition("REJECTED", "APPROVED")).toThrow(DomainError);
 

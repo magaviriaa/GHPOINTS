@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
-import { prisma } from "@/server/db/prisma";
+import { db } from "@/server/db/prisma";
 
 export async function GET() {
   try {
-    await prisma.$queryRaw`SELECT 1`;
+    const plan = db.raw.sql`SELECT 1 AS ok`.returnsRow({ ok: "pg/int4@1" }).build();
+    await db.runtime().query(plan);
     return NextResponse.json({ ok: true, service: "gh-points", db: "up" });
   } catch {
     return NextResponse.json(

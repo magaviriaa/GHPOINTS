@@ -4,7 +4,8 @@ import { createHash, randomBytes } from "crypto";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { cookies } from "next/headers";
 import { z } from "zod";
-import { prisma } from "@/server/db/prisma";
+import { db } from "@/server/db/prisma";
+import { isoNow } from "@/server/db/time";
 import {
   getAllowedEmailDomains,
   getEntraAllowedTids,
@@ -16,6 +17,7 @@ import { hashSecret, safeEqual } from "@/server/auth/secrets";
 import { ENTRA_STATE_COOKIE } from "@/lib/constants";
 import { entraEmailFromClaims, isEntraTidAllowed } from "@/server/auth/entra-pure";
 import { DomainError, ErrorCodes } from "@/server/domain/errors";
+import { canAuthenticate } from "@/server/domain/members-pure";
 
 const STATE_TTL_MS = 10 * 60 * 1000;
 
@@ -219,10 +221,10 @@ export async function completeEntraCallback(input: {
     );
   }
 
-  const member = await prisma.member.findUnique({
-    where: { institutionalEmail: normalizeEmail(email) },
-  });
-  if (!member || member.status !== "ACTIVE") {
+  const member = await db.orm.public.Member.where({
+    institutionalEmail: normalizeEmail(email),
+  }).first();
+  if (!member || !canAuthenticate(member.status)) {
     throw new DomainError(
       ErrorCodes.MEMBER_INACTIVE,
       "Tu correo no está en la lista de integrantes.",
@@ -230,27 +232,22 @@ export async function completeEntraCallback(input: {
     );
   }
 
-  await prisma.identityAccount.upsert({
-    where: {
-      provider_providerUserId: {
-        provider: "MICROSOFT_ENTRA",
-        providerUserId: claims.oid,
-      },
-    },
-    update: {
-      memberId: member.id,
-      microsoftOid: claims.oid,
-      microsoftTid: claims.tid,
-      lastLoginAt: new Date(),
-    },
+  await db.orm.public.IdentityAccount.upsert({
     create: {
       memberId: member.id,
       provider: "MICROSOFT_ENTRA",
       providerUserId: claims.oid,
       microsoftOid: claims.oid,
       microsoftTid: claims.tid,
-      lastLoginAt: new Date(),
+      lastLoginAt: isoNow(),
     },
+    update: {
+      memberId: member.id,
+      microsoftOid: claims.oid,
+      microsoftTid: claims.tid,
+      lastLoginAt: isoNow(),
+    },
+    conflictOn: { provider: "MICROSOFT_ENTRA", providerUserId: claims.oid },
   });
 
   return { memberId: member.id, next: pending.next };

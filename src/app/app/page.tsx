@@ -3,6 +3,7 @@ import { ArrowRight, QrCode } from "lucide-react";
 
 import { requirePageActor } from "@/server/auth/guard";
 import { getMemberHome } from "@/server/domain/member-reads";
+import { participatesInCompetition } from "@/server/domain/members-pure";
 import { firstName } from "@/lib/text";
 import { formatDateTime } from "@/lib/dates";
 import { roundRateDisplay } from "@/server/domain/scoring-pure";
@@ -33,11 +34,13 @@ export default async function AppHomePage() {
             label="Ranking general"
             value={home.standing?.rank ? `#${home.standing.rank}` : "—"}
             hint={
-              home.standing?.rank
-                ? `de ${home.standing.boardSize} en ${
-                    home.standing.memberType === "NEW" ? "nuevos" : "activos"
-                  }`
-                : "Suma tus primeros puntos para entrar al tablero"
+              !participatesInCompetition(actor.status)
+                ? "Los honorarios no entran al tablero de temporada"
+                : home.standing?.rank
+                  ? `de ${home.standing.boardSize} en ${
+                      home.standing.memberType === "NEW" ? "nuevos" : "activos"
+                    }`
+                  : "Suma tus primeros puntos para entrar al tablero"
             }
             onBand
           />

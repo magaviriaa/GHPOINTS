@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { completeEntraCallback } from "@/server/auth/entra";
 import { clientIp, clientUserAgent } from "@/server/auth/identity";
 import { createSession, setSessionCookie } from "@/server/auth/session";
-import { prisma } from "@/server/db/prisma";
+import { db } from "@/server/db/prisma";
 import { hasAdminRole } from "@/server/domain/authorization";
 import { isDomainError, toUserMessage } from "@/server/domain/errors";
 
@@ -25,11 +25,10 @@ export async function GET(request: NextRequest) {
     });
     await setSessionCookie(session.token, session.expiresAt);
 
-    const member = await prisma.member.findUnique({
-      where: { id: result.memberId },
-      include: { roles: true },
-    });
-    const isAdminUser = member ? hasAdminRole(member.roles) : false;
+    const roles = await db.orm.public.MemberRole.where({ memberId: result.memberId }).all();
+    const isAdminUser = hasAdminRole(
+      roles.map((role) => ({ role: role.role, committeeId: role.committeeId }))
+    );
     const nextPath =
       isAdminUser && (result.next === "/app" || result.next === "/") ? "/admin" : result.next;
     return NextResponse.redirect(new URL(nextPath, request.url));

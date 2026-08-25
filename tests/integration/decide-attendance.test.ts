@@ -1,6 +1,7 @@
 import "dotenv/config";
-import { PrismaClient } from "@prisma/client";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { db } from "@/server/db/prisma";
+import { isoNow, toIso } from "@/server/db/time";
 import { decideAttendance } from "@/server/domain/attendance";
 import { runAttendanceEffects } from "@/server/domain/attendance-effects";
 import { isDomainError } from "@/server/domain/errors";
@@ -19,7 +20,6 @@ type Fixture = {
 };
 
 describe.skipIf(!shouldRun)("decideAttendance (db)", () => {
-  const prisma = new PrismaClient();
   const fixture: Fixture = {
     memberIds: [],
     attendanceIds: [],
@@ -29,11 +29,10 @@ describe.skipIf(!shouldRun)("decideAttendance (db)", () => {
   };
 
   beforeAll(async () => {
-    await prisma.$connect();
-    const season = await prisma.season.findFirst({ where: { status: "ACTIVE" } });
-    const admin = await prisma.member.findFirst({
-      where: { roles: { some: { role: "ADMIN" } } },
-    });
+    const season = await db.orm.public.Season.where({ status: "ACTIVE" }).first();
+    const admin = await db.orm.public.Member.where((member) =>
+      member.roles.some({ role: "ADMIN" })
+    ).first();
     if (!season || !admin) return;
 
     fixture.seasonId = season.id;
@@ -48,39 +47,33 @@ describe.skipIf(!shouldRun)("decideAttendance (db)", () => {
     };
 
     const now = Date.now();
-    const activity = await prisma.activity.create({
-      data: {
-        publicId: `test-decide-${stamp}`,
-        seasonId: season.id,
-        name: `Decide ${stamp}`,
-        startsAt: new Date(now),
-        registrationStart: new Date(now - 60_000),
-        registrationEnd: new Date(now + 3_600_000),
-        individualPoints: POINTS,
-        approvalMode: "MANUAL",
-        status: "OPEN",
-        createdById: admin.id,
-      },
+    const activity = await db.orm.public.Activity.create({
+      publicId: `test-decide-${stamp}`,
+      seasonId: season.id,
+      name: `Decide ${stamp}`,
+      startsAt: isoNow(new Date(now)),
+      registrationStart: toIso(new Date(now - 60_000)),
+      registrationEnd: toIso(new Date(now + 3_600_000)),
+      individualPoints: POINTS,
+      approvalMode: "MANUAL",
+      status: "OPEN",
+      createdById: admin.id,
     });
     fixture.activityId = activity.id;
 
     for (let index = 0; index < 4; index += 1) {
-      const member = await prisma.member.create({
-        data: {
-          fullName: `Decide Tester ${index} ${stamp}`,
-          institutionalEmail: `decide.${index}.${stamp}@test.local`,
-          memberType: "ACTIVE",
-          status: "ACTIVE",
-        },
+      const member = await db.orm.public.Member.create({
+        fullName: `Decide Tester ${index} ${stamp}`,
+        institutionalEmail: `decide.${index}.${stamp}@test.local`,
+        memberType: "ACTIVE",
+        status: "ACTIVE",
       });
       fixture.memberIds.push(member.id);
-      const attendance = await prisma.attendance.create({
-        data: {
-          activityId: activity.id,
-          memberId: member.id,
-          status: "PENDING",
-          source: "LINK",
-        },
+      const attendance = await db.orm.public.Attendance.create({
+        activityId: activity.id,
+        memberId: member.id,
+        status: "PENDING",
+        source: "LINK",
       });
       fixture.attendanceIds.push(attendance.id);
     }
@@ -92,22 +85,25 @@ describe.skipIf(!shouldRun)("decideAttendance (db)", () => {
         activityId: fixture.activityId,
         seasonId: fixture.seasonId,
       });
-      await prisma.pointTransaction.deleteMany({ where: { activityId: fixture.activityId } });
-      await prisma.committeeActivityScore.deleteMany({
-        where: { activityId: fixture.activityId },
-      });
-      await prisma.attendance.deleteMany({ where: { activityId: fixture.activityId } });
-      await prisma.activity.deleteMany({ where: { id: fixture.activityId } });
+      await db.orm.public.PointTransaction.where({ activityId: fixture.activityId }).deleteAndCount();
+      await db.orm.public.CommitteeActivityScore.where({
+        activityId: fixture.activityId,
+      }).deleteAndCount();
+      await db.orm.public.Attendance.where({ activityId: fixture.activityId }).deleteAndCount();
+      await db.orm.public.Activity.where({ id: fixture.activityId }).deleteAndCount();
     }
     if (fixture.memberIds.length) {
-      await prisma.auditLog.deleteMany({ where: { entityId: { in: fixture.attendanceIds } } });
-      await prisma.memberBadge.deleteMany({ where: { memberId: { in: fixture.memberIds } } });
-      await prisma.pointTransaction.deleteMany({
-        where: { memberId: { in: fixture.memberIds } },
-      });
-      await prisma.member.deleteMany({ where: { id: { in: fixture.memberIds } } });
+      await db.orm.public.AuditLog.where((row) =>
+        row.entityId.in(fixture.attendanceIds)
+      ).deleteAndCount();
+      await db.orm.public.MemberBadge.where((row) =>
+        row.memberId.in(fixture.memberIds)
+      ).deleteAndCount();
+      await db.orm.public.PointTransaction.where((row) =>
+        row.memberId.in(fixture.memberIds)
+      ).deleteAndCount();
+      await db.orm.public.Member.where((row) => row.id.in(fixture.memberIds)).deleteAndCount();
     }
-    await prisma.$disconnect();
   });
 
   it("approves a batch atomically, audits each row and notifies every Integrante", async () => {
@@ -131,23 +127,26 @@ describe.skipIf(!shouldRun)("decideAttendance (db)", () => {
 
     expect(results.length).toBe(3);
 
-    const approved = await prisma.attendance.count({
-      where: { id: { in: batch }, status: "APPROVED" },
-    });
-    expect(approved).toBe(3);
+    const approved = await db.orm.public.Attendance.where((row) => row.id.in(batch))
+      .where({ status: "APPROVED" })
+      .aggregate((agg) => ({ total: agg.count() }));
+    expect(approved.total).toBe(3);
 
-    const credits = await prisma.pointTransaction.aggregate({
-      where: { attendanceId: { in: batch }, type: "ACTIVITY" },
-      _sum: { points: true },
-      _count: { _all: true },
-    });
-    expect(credits._count._all).toBe(3);
-    expect(credits._sum.points).toBe(3 * POINTS);
+    const credits = await db.orm.public.PointTransaction.where((row) =>
+      row.attendanceId.in(batch)
+    )
+      .where({ type: "ACTIVITY" })
+      .aggregate((agg) => ({
+        total: agg.count(),
+        points: agg.sum("points"),
+      }));
+    expect(credits.total).toBe(3);
+    expect(credits.points).toBe(3 * POINTS);
 
-    const audits = await prisma.auditLog.count({
-      where: { entityId: { in: batch }, action: "ATTENDANCE_APPROVED" },
-    });
-    expect(audits).toBe(3);
+    const audits = await db.orm.public.AuditLog.where((row) => row.entityId.in(batch))
+      .where({ action: "ATTENDANCE_APPROVED" })
+      .aggregate((agg) => ({ total: agg.count() }));
+    expect(audits.total).toBe(3);
 
     expect(approvalEmails).toBe(3);
   });
@@ -164,7 +163,7 @@ describe.skipIf(!shouldRun)("decideAttendance (db)", () => {
       })
     ).rejects.toSatisfy((error) => isDomainError(error) && error.code === "NOT_FOUND");
 
-    const row = await prisma.attendance.findUnique({ where: { id: survivor } });
+    const row = await db.orm.public.Attendance.first({ id: survivor });
     expect(row?.status).toBe("PENDING");
   });
 

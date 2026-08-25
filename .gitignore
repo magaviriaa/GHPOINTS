@@ -41,7 +41,6 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-/src/generated/prisma
 .env
 
 # local nested checkout and SQLite artifacts
@@ -53,3 +52,5 @@ next-env.d.ts
 /playwright-report/
 /blob-report/
 /playwright/.cache/
+node_modules/
+dist/

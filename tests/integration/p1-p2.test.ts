@@ -1,6 +1,7 @@
 import "dotenv/config";
-import { PrismaClient } from "@prisma/client";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { db } from "@/server/db/prisma";
+import { toDateOnly, toIso } from "@/server/db/time";
 import { decideAttendance } from "@/server/domain/attendance";
 import { updateSeasonStatus } from "@/server/domain/season";
 import { setMemberRoles } from "@/server/domain/members";
@@ -10,7 +11,6 @@ import { createPublicId } from "@/lib/public-id";
 const shouldRun = Boolean(process.env.DATABASE_URL?.startsWith("postgres"));
 
 describe.skipIf(!shouldRun)("P1/P2 domain (db)", () => {
-  const prisma = new PrismaClient();
   const stamp = Date.now();
   let adminId = "";
   let memberId = "";
@@ -32,101 +32,82 @@ describe.skipIf(!shouldRun)("P1/P2 domain (db)", () => {
   }
 
   beforeAll(async () => {
-    await prisma.$connect();
-    const admin = await prisma.member.create({
-      data: {
-        fullName: "Roles Admin",
-        institutionalEmail: `roles-admin-${stamp}@example.test`,
-        memberType: "ACTIVE",
-        roles: { create: [{ role: "ADMIN" }, { role: "MEMBER" }] },
-      },
+    const admin = await db.orm.public.Member.create({
+      fullName: "Roles Admin",
+      institutionalEmail: `roles-admin-${stamp}@example.test`,
+      memberType: "ACTIVE",
+      roles: (roles) => roles.create([{ role: "ADMIN" }, { role: "MEMBER" }]),
     });
     adminId = admin.id;
 
-    const member = await prisma.member.create({
-      data: {
-        fullName: "Roles Member",
-        institutionalEmail: `roles-member-${stamp}@example.test`,
-        memberType: "NEW",
-        roles: { create: { role: "MEMBER" } },
-      },
+    const member = await db.orm.public.Member.create({
+      fullName: "Roles Member",
+      institutionalEmail: `roles-member-${stamp}@example.test`,
+      memberType: "NEW",
+      roles: (roles) => roles.create({ role: "MEMBER" }),
     });
     memberId = member.id;
 
-    const season = await prisma.season.create({
-      data: {
-        name: `Roles ${stamp}`,
-        startDate: new Date("2026-01-01"),
-        endDate: new Date("2026-12-31"),
-        status: "UPCOMING",
-      },
+    const season = await db.orm.public.Season.create({
+      name: `Roles ${stamp}`,
+      startDate: toDateOnly("2026-01-01"),
+      endDate: toDateOnly("2026-12-31"),
+      status: "UPCOMING",
     });
     seasonId = season.id;
 
-    const closed = await prisma.season.create({
-      data: {
-        name: `HOF ${stamp}`,
-        startDate: new Date("2025-01-01"),
-        endDate: new Date("2025-06-01"),
-        status: "UPCOMING",
-      },
+    const closed = await db.orm.public.Season.create({
+      name: `HOF ${stamp}`,
+      startDate: toDateOnly("2025-01-01"),
+      endDate: toDateOnly("2025-06-01"),
+      status: "UPCOMING",
     });
     closedSeasonId = closed.id;
 
-    const activity = await prisma.activity.create({
-      data: {
-        publicId: createPublicId(),
-        seasonId: season.id,
-        name: "Bulk reject activity",
-        startsAt: new Date("2026-06-01T18:00:00Z"),
-        registrationStart: new Date("2026-05-01T00:00:00Z"),
-        registrationEnd: new Date("2026-06-02T00:00:00Z"),
-        individualPoints: 10,
-        status: "OPEN",
-        createdById: admin.id,
-      },
+    const activity = await db.orm.public.Activity.create({
+      publicId: createPublicId(),
+      seasonId: season.id,
+      name: "Bulk reject activity",
+      startsAt: toIso(new Date("2026-06-01T18:00:00Z")),
+      registrationStart: toIso(new Date("2026-05-01T00:00:00Z")),
+      registrationEnd: toIso(new Date("2026-06-02T00:00:00Z")),
+      individualPoints: 10,
+      status: "OPEN",
+      createdById: admin.id,
     });
     activityId = activity.id;
 
-    const attendance = await prisma.attendance.create({
-      data: {
-        activityId: activity.id,
-        memberId: member.id,
-        status: "PENDING",
-        source: "ADMIN",
-      },
+    const attendance = await db.orm.public.Attendance.create({
+      activityId: activity.id,
+      memberId: member.id,
+      status: "PENDING",
+      source: "ADMIN",
     });
     attendanceId = attendance.id;
   });
 
   afterAll(async () => {
-    await prisma.memberBadge.deleteMany({
-      where: { memberId: { in: [adminId, memberId].filter(Boolean) } },
-    });
+    const memberIds = [adminId, memberId].filter(Boolean);
+    if (memberIds.length) {
+      await db.orm.public.MemberBadge.where((row) => row.memberId.in(memberIds)).deleteAndCount();
+    }
     if (closedSeasonId) {
-      await prisma.hallOfFameSeason.deleteMany({ where: { seasonId: closedSeasonId } });
+      await db.orm.public.HallOfFameSeason.where({ seasonId: closedSeasonId }).deleteAndCount();
     }
     if (activityId) {
-      await prisma.committeeActivityScore.deleteMany({ where: { activityId } });
-      await prisma.pointTransaction.deleteMany({ where: { activityId } });
-      await prisma.attendance.deleteMany({ where: { activityId } });
-      await prisma.activityPublicIdHistory.deleteMany({ where: { activityId } });
-      await prisma.activity.deleteMany({ where: { id: activityId } });
+      await db.orm.public.CommitteeActivityScore.where({ activityId }).deleteAndCount();
+      await db.orm.public.PointTransaction.where({ activityId }).deleteAndCount();
+      await db.orm.public.Attendance.where({ activityId }).deleteAndCount();
+      await db.orm.public.ActivityPublicIdHistory.where({ activityId }).deleteAndCount();
+      await db.orm.public.Activity.where({ id: activityId }).deleteAndCount();
     }
-    if (seasonId) await prisma.season.deleteMany({ where: { id: seasonId } });
-    if (closedSeasonId) await prisma.season.deleteMany({ where: { id: closedSeasonId } });
+    if (seasonId) await db.orm.public.Season.where({ id: seasonId }).deleteAndCount();
+    if (closedSeasonId) await db.orm.public.Season.where({ id: closedSeasonId }).deleteAndCount();
     if (adminId || memberId) {
-      await prisma.memberRole.deleteMany({
-        where: { memberId: { in: [adminId, memberId].filter(Boolean) } },
-      });
-      await prisma.auditLog.deleteMany({
-        where: { actorId: { in: [adminId, memberId].filter(Boolean) } },
-      });
-      await prisma.member.deleteMany({
-        where: { id: { in: [adminId, memberId].filter(Boolean) } },
-      });
+      await db.orm.public.MemberRole.where((row) => row.memberId.in(memberIds)).deleteAndCount();
+      await db.orm.public.AuditLog.where((row) => row.actorId.in(memberIds)).deleteAndCount();
+      await db.orm.public.Member.where((row) => row.id.in(memberIds)).deleteAndCount();
     }
-    await prisma.$disconnect();
   });
 
   it("bulk-rejects pending attendances without crediting points", async () => {
@@ -135,14 +116,16 @@ describe.skipIf(!shouldRun)("P1/P2 domain (db)", () => {
       attendanceIds: [attendanceId],
       to: "REJECTED",
     });
-    const row = await prisma.attendance.findUnique({ where: { id: attendanceId } });
+    const row = await db.orm.public.Attendance.first({ id: attendanceId });
     expect(row?.status).toBe("REJECTED");
-    const points = await prisma.pointTransaction.count({ where: { attendanceId } });
-    expect(points).toBe(0);
+    const points = await db.orm.public.PointTransaction.where({ attendanceId }).aggregate((agg) => ({
+      total: agg.count(),
+    }));
+    expect(points.total).toBe(0);
   });
 
   it("lets admin assign COMMITTEE_LEADER and keeps MEMBER", async () => {
-    const committee = await prisma.committee.findFirst();
+    const committee = await db.orm.public.Committee.first();
     if (!committee) return;
     await setMemberRoles({
       actor: adminActor(),
@@ -150,7 +133,7 @@ describe.skipIf(!shouldRun)("P1/P2 domain (db)", () => {
       isAdmin: false,
       leaderCommitteeIds: [committee.id],
     });
-    const roles = await prisma.memberRole.findMany({ where: { memberId } });
+    const roles = await db.orm.public.MemberRole.where({ memberId }).all();
     expect(roles.some((role) => role.role === "MEMBER")).toBe(true);
     expect(
       roles.some((role) => role.role === "COMMITTEE_LEADER" && role.committeeId === committee.id)
@@ -163,9 +146,7 @@ describe.skipIf(!shouldRun)("P1/P2 domain (db)", () => {
       seasonId: closedSeasonId,
       status: "CLOSED",
     });
-    const hof = await prisma.hallOfFameSeason.findUnique({
-      where: { seasonId: closedSeasonId },
-    });
+    const hof = await db.orm.public.HallOfFameSeason.where({ seasonId: closedSeasonId }).first();
     expect(hof).not.toBeNull();
     expect(hof?.stats).toBeTruthy();
   });
@@ -177,13 +158,19 @@ describe.skipIf(!shouldRun)("P1/P2 domain (db)", () => {
       isAdmin: true,
       leaderCommitteeIds: [],
     });
-    expect(await prisma.memberRole.count({ where: { memberId, role: "ADMIN" } })).toBeGreaterThan(0);
+    const granted = await db.orm.public.MemberRole.where({ memberId, role: "ADMIN" }).aggregate(
+      (agg) => ({ total: agg.count() })
+    );
+    expect(granted.total).toBeGreaterThan(0);
     await setMemberRoles({
       actor: adminActor(),
       memberId,
       isAdmin: false,
       leaderCommitteeIds: [],
     });
-    expect(await prisma.memberRole.count({ where: { memberId, role: "ADMIN" } })).toBe(0);
+    const revoked = await db.orm.public.MemberRole.where({ memberId, role: "ADMIN" }).aggregate(
+      (agg) => ({ total: agg.count() })
+    );
+    expect(revoked.total).toBe(0);
   });
 });

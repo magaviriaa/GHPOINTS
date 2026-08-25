@@ -1,6 +1,8 @@
 import "server-only";
 
-import { prisma } from "@/server/db/prisma";
+import { and } from "@prisma/orm-postgres/orm-client";
+import { db } from "@/server/db/prisma";
+import { isUniqueConstraint } from "@/server/db/errors";
 import {
   BADGE_SLUGS,
   consecutiveActivityStreak,
@@ -20,16 +22,19 @@ type Award = {
 };
 
 async function badgeIdBySlug(): Promise<Map<string, string>> {
-  const badges = await prisma.badge.findMany();
+  const badges = await db.orm.public.Badge.all();
   return new Map(badges.map((badge) => [badge.slug, badge.id]));
 }
 
 async function insertAwards(awards: Award[]) {
   if (awards.length === 0) return;
-  await prisma.memberBadge.createMany({
-    data: awards,
-    skipDuplicates: true,
-  });
+  for (const award of awards) {
+    try {
+      await db.orm.public.MemberBadge.create(award);
+    } catch (error) {
+      if (!isUniqueConstraint(error)) throw error;
+    }
+  }
 }
 
 /**
@@ -45,10 +50,9 @@ async function rankBadgesForMember(input: {
   topId?: string;
   mvpId?: string;
 }): Promise<Award[]> {
-  const member = await prisma.member.findUnique({
-    where: { id: input.memberId },
-    select: { memberType: true, status: true },
-  });
+  const member = await db.orm.public.Member.where({ id: input.memberId })
+    .select("memberType", "status")
+    .first();
   if (!member || member.status !== "ACTIVE") return [];
 
   const awards: Award[] = [];
@@ -147,25 +151,25 @@ export async function refreshBadges(input: { seasonId: string; memberId?: string
   const mvpId = ids.get(BADGE_SLUGS.MONTHLY_MVP);
   const leaderId = ids.get(BADGE_SLUGS.LEADER);
 
-  const activities = await prisma.activity.findMany({
-    where: {
-      seasonId: input.seasonId,
-      status: { in: ["OPEN", "CLOSED", "PROCESSED"] },
-    },
-    select: { id: true, startsAt: true },
-    orderBy: { startsAt: "desc" },
-  });
+  const activities = await db.orm.public.Activity.where({ seasonId: input.seasonId })
+    .where((activity) => activity.status.in(["OPEN", "CLOSED", "PROCESSED"]))
+    .select("id", "startsAt")
+    .orderBy((activity) => activity.startsAt.desc())
+    .all();
 
-  const memberFilter = input.memberId ? { memberId: input.memberId } : {};
+  let approvedQuery = db.orm.public.Attendance.where({ status: "APPROVED" }).where((attendance) =>
+    attendance.activity.some((activity) =>
+      and(
+        activity.seasonId.eq(input.seasonId),
+        activity.status.in(["OPEN", "CLOSED", "PROCESSED"])
+      )
+    )
+  );
+  if (input.memberId) {
+    approvedQuery = approvedQuery.where({ memberId: input.memberId });
+  }
 
-  const approved = await prisma.attendance.findMany({
-    where: {
-      ...memberFilter,
-      status: "APPROVED",
-      activity: { seasonId: input.seasonId, status: { in: ["OPEN", "CLOSED", "PROCESSED"] } },
-    },
-    select: { memberId: true, activityId: true },
-  });
+  const approved = await approvedQuery.select("memberId", "activityId").all();
 
   const attendedByMember = new Map<string, Set<string>>();
   for (const row of approved) {
@@ -174,14 +178,16 @@ export async function refreshBadges(input: { seasonId: string; memberId?: string
     attendedByMember.set(row.memberId, set);
   }
 
-  const totals = await prisma.pointTransaction.groupBy({
-    by: ["memberId"],
-    where: {
-      seasonId: input.seasonId,
-      member: input.memberId ? { id: input.memberId } : { status: "ACTIVE" },
-    },
-    _sum: { points: true },
-  });
+  let totalsQuery = db.orm.public.PointTransaction.where({ seasonId: input.seasonId });
+  if (input.memberId) {
+    totalsQuery = totalsQuery.where({ memberId: input.memberId });
+  } else {
+    totalsQuery = totalsQuery.where((row) =>
+      row.member.some((member) => member.status.eq("ACTIVE"))
+    );
+  }
+
+  const totals = await totalsQuery.groupBy("memberId").aggregate((agg) => ({ total: agg.sum("points") }));
 
   if (streakId) {
     const memberIds =
@@ -202,7 +208,7 @@ export async function refreshBadges(input: { seasonId: string; memberId?: string
 
   if (pointsId) {
     for (const row of totals) {
-      if (earnsPointsBadge(row._sum.points ?? 0)) {
+      if (earnsPointsBadge(row.total ?? 0)) {
         awards.push({
           memberId: row.memberId,
           badgeId: pointsId,
@@ -223,19 +229,19 @@ export async function refreshBadges(input: { seasonId: string; memberId?: string
       }))
     );
   } else {
-    awards.push(
-      ...(await rankBadgesForSeason({ seasonId: input.seasonId, topId, mvpId }))
-    );
+    awards.push(...(await rankBadgesForSeason({ seasonId: input.seasonId, topId, mvpId })));
   }
 
   if (leaderId) {
-    const leaders = await prisma.memberRole.findMany({
-      where: {
-        role: "COMMITTEE_LEADER",
-        member: input.memberId ? { id: input.memberId } : { status: "ACTIVE" },
-      },
-      select: { memberId: true },
-    });
+    let leadersQuery = db.orm.public.MemberRole.where({ role: "COMMITTEE_LEADER" });
+    if (input.memberId) {
+      leadersQuery = leadersQuery.where({ memberId: input.memberId });
+    } else {
+      leadersQuery = leadersQuery.where((row) =>
+        row.member.some((member) => member.status.eq("ACTIVE"))
+      );
+    }
+    const leaders = await leadersQuery.select("memberId").all();
     const uniqueLeaders = new Set(leaders.map((row) => row.memberId));
     for (const memberId of uniqueLeaders) {
       awards.push({

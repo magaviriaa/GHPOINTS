@@ -1,14 +1,13 @@
 import "server-only";
 
-import type { AttendanceStatus, Prisma as PrismaNS } from "@prisma/client";
+import type { AttendanceStatus } from "@/server/db/types";
+import type { Tx } from "@/server/db/prisma";
 import { DomainError, ErrorCodes } from "@/server/domain/errors";
 import {
   createActivityPoints,
   findUnreversedActivityTransaction,
   reverseTransaction,
 } from "@/server/domain/points";
-
-type TransactionClient = PrismaNS.TransactionClient;
 
 export type AttendanceCreditActivity = {
   id: string;
@@ -87,7 +86,7 @@ export function assertAttendanceTransition(from: AttendanceStatus, to: Attendanc
 }
 
 export async function syncAttendanceCredit(
-  tx: TransactionClient,
+  tx: Tx,
   input: {
     attendanceId: string;
     memberId: string;

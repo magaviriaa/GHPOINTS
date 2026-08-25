@@ -1,15 +1,10 @@
-import { Prisma } from "@prisma/client";
 import { describe, expect, it } from "vitest";
 import { DomainError } from "@/server/domain/errors";
 import { isUniqueConstraint } from "@/server/db/errors";
 
 describe("idempotency guards", () => {
-  it("detects Prisma unique violations", () => {
-    const error = new Prisma.PrismaClientKnownRequestError("Unique", {
-      code: "P2002",
-      clientVersion: "test",
-    });
-    expect(isUniqueConstraint(error)).toBe(true);
+  it("detects unique violations", () => {
+    expect(isUniqueConstraint({ sqlState: "23505" })).toBe(true);
     expect(isUniqueConstraint(new Error("nope"))).toBe(false);
   });
 

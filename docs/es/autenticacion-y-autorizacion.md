@@ -72,7 +72,7 @@ Hashes (`secrets.ts`):
 - OTP: último reto `OTP` no consumido de ese email. Expirado → `OTP_EXPIRED`. `attempts >= maxAttempts` (5) → `OTP_RATE_LIMITED`. Fallo incrementa `attempts`.
 - Magic: busca por `codeHash` del token. Token de menos de 16 caracteres se rechaza.
 - Éxito: `consumeChallengesAndLoadMember` consume **todos** los retos abiertos de ese email (ADR-016), upsert `IdentityAccount` `EMAIL_OTP` / `providerUserId=email`, `lastLoginAt`.
-- Integrante inactivo o desaparecido → `MEMBER_INACTIVE`.
+- Integrante en licencia, retirado o desaparecido → `MEMBER_INACTIVE`. Honorario sí inicia sesión.
 
 Luego `completeEmailOtp` / `consumeMagicLinkLogin` crean sesión y cookie.
 

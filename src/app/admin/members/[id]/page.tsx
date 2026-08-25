@@ -6,11 +6,13 @@ import { getMemberDetail } from "@/server/domain/members";
 import { listCommittees } from "@/server/domain/committees";
 import { sumMemberPoints } from "@/server/domain/points";
 import { getActiveSeason } from "@/server/domain/season";
+import { getCreditStrategy } from "@/server/config/app-config";
 import { adminUpdateMemberAction } from "@/server/actions/admin";
 import { ClientForm, SubmitButton } from "@/components/forms/client-form";
 import { CheckChip, Field, NativeSelect } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { formatDateTime } from "@/lib/dates";
+import { splitMemberships } from "@/server/domain/members-pure";
 import {
   MEMBER_STATUS,
   MEMBER_TYPE,
@@ -19,6 +21,9 @@ import {
 } from "@/lib/labels";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { EmptyState, SectionHeader, StatCard } from "@/components/ui-blocks";
+import { CommitteePicker } from "@/components/admin/committee-picker";
+import { MembershipHistory } from "@/components/members/membership-history";
+import { CommitteeCreditNote } from "@/components/members/committee-credit-note";
 
 export default async function AdminMemberDetailPage({
   params,
@@ -26,17 +31,16 @@ export default async function AdminMemberDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const [member, committees, season] = await Promise.all([
+  const [member, committees, season, creditStrategy] = await Promise.all([
     getMemberDetail(id),
     listCommittees(),
     getActiveSeason(),
+    getCreditStrategy(),
   ]);
   if (!member) notFound();
 
   const points = season ? await sumMemberPoints(member.id, season.id) : 0;
-  const activeCommittees = new Set(
-    member.committees.filter((item) => item.isActive).map((item) => item.committeeId)
-  );
+  const { current: currentMemberships } = splitMemberships(member.committees);
   const isAdminUser = member.roles.some((role) => role.role === "ADMIN");
   const leaderCommitteeIds = new Set(
     member.roles.flatMap((role) =>
@@ -72,14 +76,15 @@ export default async function AdminMemberDetailPage({
           value={points}
           hint={season ? `Temporada ${season.name}` : "Sin temporada activa"}
         />
-        <StatCard label="Comités" value={activeCommittees.size} />
+        <StatCard label="Comités" value={currentMemberships.length} />
         <StatCard label="Movimientos" value={member.pointTransactions.length} />
       </div>
 
       <section className="rounded-xl border bg-card p-4">
         <h2 className="font-display font-bold">Datos y permisos</h2>
         <p className="mt-1 text-sm text-muted-foreground">
-          Desactivar a alguien lo saca de los tableros; su historial de puntos se conserva.
+          Licencia y retiro sacan a la persona del tablero. Honorario puede entrar, pero no
+          compite. El historial de puntos se conserva.
         </p>
         <ClientForm
           action={adminUpdateMemberAction}
@@ -116,22 +121,10 @@ export default async function AdminMemberDetailPage({
             </NativeSelect>
           </Field>
 
-          <fieldset className="space-y-2 md:col-span-2">
-            <legend className="mb-1 text-sm font-medium">Comités</legend>
-            <div className="flex flex-wrap gap-2">
-              {committees.map((committee) => (
-                <CheckChip
-                  key={committee.id}
-                  name="committeeIds"
-                  value={committee.id}
-                  color={committee.color}
-                  defaultChecked={activeCommittees.has(committee.id)}
-                >
-                  {committee.name}
-                </CheckChip>
-              ))}
-            </div>
-          </fieldset>
+          <CommitteePicker
+            committees={committees}
+            defaultIds={currentMemberships.map((item) => item.committeeId)}
+          />
 
           <fieldset className="space-y-2 md:col-span-2">
             <legend className="text-sm font-medium">Líder de comité</legend>
@@ -166,6 +159,13 @@ export default async function AdminMemberDetailPage({
           </div>
         </ClientForm>
       </section>
+
+      <CommitteeCreditNote
+        strategy={creditStrategy}
+        committeeNames={currentMemberships.map((item) => item.committee.name)}
+      />
+
+      <MembershipHistory memberships={member.committees} showCurrent={false} />
 
       <section className="space-y-3">
         <SectionHeader title="Historial de puntos" />

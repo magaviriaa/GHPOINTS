@@ -1,20 +1,11 @@
 import "dotenv/config";
-import { PrismaClient } from "@prisma/client";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
+import { db } from "@/server/db/prisma";
 import { getIndividualRanking, getMemberBoardPosition } from "@/server/domain/ranking";
 
 const shouldRun = Boolean(process.env.DATABASE_URL?.startsWith("postgres"));
 
 describe.skipIf(!shouldRun)("getMemberBoardPosition (db)", () => {
-  const prisma = new PrismaClient();
-
-  beforeAll(async () => {
-    await prisma.$connect();
-  });
-
-  afterAll(async () => {
-    await prisma.$disconnect();
-  });
 
   it("agrees with the full board for every entry, ties included", async () => {
     for (const board of ["ACTIVE", "NEW"] as const) {
@@ -38,10 +29,10 @@ describe.skipIf(!shouldRun)("getMemberBoardPosition (db)", () => {
   });
 
   it("leaves an Integrante with no transactions off the board", async () => {
-    const orphan = await prisma.member.findFirst({
-      where: { status: "ACTIVE", pointTransactions: { none: {} } },
-      select: { id: true, memberType: true },
-    });
+    const orphan = await db.orm.public.Member.where({ status: "ACTIVE" })
+      .where((member) => member.pointTransactions.none())
+      .select("id", "memberType")
+      .first();
     if (!orphan) return;
 
     const position = await getMemberBoardPosition({

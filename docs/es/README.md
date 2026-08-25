@@ -8,7 +8,7 @@ Este directorio describe el código tal como está en el repositorio. El glosari
 
 1. **Arranque y operación:** [configuracion-y-despliegue.md](./configuracion-y-despliegue.md) — variables, Docker, scripts, seed.
 2. **Cómo está armada la app:** [arquitectura.md](./arquitectura.md) — capas, request, server actions vs API.
-3. **Vocabulario persistido:** [modelo-de-datos.md](./modelo-de-datos.md) — Prisma, índices, uniques parciales.
+3. **Vocabulario persistido:** [modelo-de-datos.md](./modelo-de-datos.md) — contrato Prisma, índices, uniques parciales.
 4. **Quién entra y con qué rol:** [autenticacion-y-autorizacion.md](./autenticacion-y-autorizacion.md).
 5. **Reglas de negocio:** [dominio.md](./dominio.md) — cada módulo de `src/server/domain/`.
 6. **Historias extremo a extremo:** [flujos.md](./flujos.md).
@@ -23,7 +23,7 @@ Si llegas a un término en mayúsculas (Integrante, Temporada, Ledger, Score de 
 | Documento | Contenido |
 | --- | --- |
 | [arquitectura.md](./arquitectura.md) | Capas `app` / `server` / `domain`, proxy, patrones |
-| [modelo-de-datos.md](./modelo-de-datos.md) | Modelos Prisma, relaciones, índices, diagrama |
+| [modelo-de-datos.md](./modelo-de-datos.md) | Contrato, relaciones, índices, diagrama |
 | [autenticacion-y-autorizacion.md](./autenticacion-y-autorizacion.md) | OTP, magic link, Entra, sesiones, RBAC |
 | [dominio.md](./dominio.md) | Scoring, puntos, asistencia, badges, rankings, import/export |
 | [flujos.md](./flujos.md) | Login, QR, puntos, temporada, importaciones |
@@ -50,8 +50,10 @@ src/server/domain/       reglas de negocio (I/O + módulos *-pure.ts)
 src/server/auth/         OTP, sesión, Entra, secretos
 src/server/actions/      server actions (FormData → dominio)
 src/server/config/       env Zod + AppConfig en DB
+src/server/db/           cliente Prisma, errores unique, tipos
+src/prisma/              contrato, runtime, uniques parciales
 src/components/          UI (shadcn + bloques de producto)
 src/lib/                 helpers puros (fechas, publicId, texto)
-prisma/                  schema, migraciones, seed
+prisma/                  seed y prune
 tests/                   unit / integration / e2e
 ```

@@ -6,9 +6,9 @@ El MVP funciona **sin** acceso administrativo al tenant de Microsoft 365. La aut
 
 ## Stack
 
-- Next.js (App Router) + TypeScript
-- PostgreSQL + Prisma
-- Tailwind CSS + shadcn/ui
+- Next.js 16 (App Router) + React 19 + TypeScript
+- Node 24, PostgreSQL 18, Prisma
+- Tailwind CSS 4 + shadcn/ui
 - Zod, Vitest, Playwright
 
 ## Arranque local
@@ -19,10 +19,14 @@ cp .env.example .env
 npm install
 npm run db:up          # si usas Docker
 # o inicia Postgres local y crea la base `ghpoints`
-npx prisma migrate dev
+npx prisma contract emit
+npx prisma db init --yes
+npm run db:constraints
 npm run db:seed
 npm run dev
 ```
+
+`npm run db:reset` hace init + constraints + seed en un paso (destructivo).
 
 En desarrollo, `OTP_FIXED_CODE=123456` evita depender de un proveedor de correo. El adapter de email escribe el código y el enlace mágico en consola si no hay `RESEND_API_KEY`.
 
@@ -46,7 +50,6 @@ Nuevas (todas opcionales salvo que se indique):
 - `AUTH_PROVIDERS` — default `email_otp`; añade `entra` para SSO
 - `ENTRA_CLIENT_ID` / `ENTRA_CLIENT_SECRET` / `ENTRA_TENANT_ID` / `ENTRA_ALLOWED_TIDS`
 - `TEAMS_WEBHOOK_URL` — incoming webhook; si vacío, no-op
-
 
 ## Documentación
 

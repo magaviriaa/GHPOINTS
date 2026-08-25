@@ -1,7 +1,8 @@
 import "server-only";
 
 import { after } from "next/server";
-import { prisma } from "@/server/db/prisma";
+import { db } from "@/server/db/prisma";
+import { isoNow } from "@/server/db/time";
 
 /**
  * Expired auth rows are dead weight: sessions are unusable once past
@@ -17,14 +18,13 @@ const MIN_INTERVAL_MS = 60 * 60 * 1000;
 let lastRunAt = 0;
 
 export async function pruneExpiredAuthRows() {
-  const now = new Date();
+  const now = Date.now();
+  const challengeCutoff = new Date(now - CHALLENGE_RETENTION_MS).toISOString();
   const [sessions, challenges] = await Promise.all([
-    prisma.session.deleteMany({ where: { expiresAt: { lt: now } } }),
-    prisma.authChallenge.deleteMany({
-      where: { createdAt: { lt: new Date(now.getTime() - CHALLENGE_RETENTION_MS) } },
-    }),
+    db.orm.public.Session.where((session) => session.expiresAt.lt(isoNow())).deleteAndCount(),
+    db.orm.public.AuthChallenge.where((row) => row.createdAt.lt(challengeCutoff)).deleteAndCount(),
   ]);
-  return { sessions: sessions.count, challenges: challenges.count };
+  return { sessions, challenges };
 }
 
 /** Fire-and-forget prune, at most once an hour per process. */
@@ -37,7 +37,6 @@ export function schedulePruneExpiredAuthRows(): void {
   try {
     after(run);
   } catch {
-    // Outside a request scope (tests, scripts).
     void run();
   }
 }

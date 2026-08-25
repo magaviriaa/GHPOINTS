@@ -1,4 +1,4 @@
-import type { MemberStatus, MemberType, RoleCode } from "@prisma/client";
+import type { MemberStatus, MemberType, RoleCode } from "@/server/db/types";
 import { DomainError, ErrorCodes } from "@/server/domain/errors";
 
 export type ActorRole = {

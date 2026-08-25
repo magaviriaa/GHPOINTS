@@ -2,7 +2,8 @@ import "server-only";
 
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
-import { prisma } from "@/server/db/prisma";
+import { db } from "@/server/db/prisma";
+import { toIso } from "@/server/db/time";
 import { resolveSeason } from "@/server/domain/season";
 import { getCommitteeRanking, getIndividualRanking } from "@/server/domain/ranking";
 
@@ -63,16 +64,12 @@ export function parseExportFormat(value: string | null): ExportFormat {
 }
 
 async function memberRows(): Promise<ExportRow[]> {
-  const members = await prisma.member.findMany({
-    include: {
-      committees: {
-        where: { isActive: true },
-        include: { committee: true },
-      },
-      roles: true,
-    },
-    orderBy: { fullName: "asc" },
-  });
+  const members = await db.orm.public.Member.include("committees", (committees) =>
+    committees.where({ isActive: true }).include("committee")
+  )
+    .include("roles")
+    .orderBy((member) => member.fullName.asc())
+    .all();
   return members.map((member) => ({
     nombre: member.fullName,
     correo: member.institutionalEmail,
@@ -86,39 +83,46 @@ async function memberRows(): Promise<ExportRow[]> {
 }
 
 async function attendanceRows(activityId?: string): Promise<ExportRow[]> {
-  const attendances = await prisma.attendance.findMany({
-    where: activityId ? { activityId } : undefined,
-    include: {
-      member: true,
-      activity: true,
-    },
-    orderBy: { registeredAt: "desc" },
-  });
+  const attendances = activityId
+    ? await db.orm.public.Attendance.where({ activityId })
+        .include("member")
+        .include("activity")
+        .orderBy((row) => row.registeredAt.desc())
+        .all()
+    : await db.orm.public.Attendance.include("member")
+        .include("activity")
+        .orderBy((row) => row.registeredAt.desc())
+        .all();
   return attendances.map((row) => ({
-    actividad: row.activity.name,
-    integrante: row.member.fullName,
-    correo: row.member.institutionalEmail,
+    actividad: String(row.activity.name),
+    integrante: String(row.member.fullName),
+    correo: String(row.member.institutionalEmail),
     estado: row.status,
     fuente: row.source,
-    registrado: row.registeredAt.toISOString(),
+    registrado: toIso(row.registeredAt),
   }));
 }
 
 async function pointRows(seasonId?: string): Promise<ExportRow[]> {
   const season = await resolveSeason(seasonId);
-  const rows = await prisma.pointTransaction.findMany({
-    where: { seasonId: season?.id },
-    include: { member: true, activity: true },
-    orderBy: { createdAt: "desc" },
-  });
+  const rows = season?.id
+    ? await db.orm.public.PointTransaction.where({ seasonId: season.id })
+        .include("member")
+        .include("activity")
+        .orderBy((row) => row.createdAt.desc())
+        .all()
+    : await db.orm.public.PointTransaction.include("member")
+        .include("activity")
+        .orderBy((row) => row.createdAt.desc())
+        .all();
   return rows.map((row) => ({
-    integrante: row.member.fullName,
-    correo: row.member.institutionalEmail,
+    integrante: String(row.member.fullName),
+    correo: String(row.member.institutionalEmail),
     puntos: row.points,
     tipo: row.type,
     motivo: row.reason,
-    actividad: row.activity?.name ?? "",
-    fecha: row.createdAt.toISOString(),
+    actividad: row.activity ? String(row.activity.name ?? "") : "",
+    fecha: toIso(row.createdAt),
   }));
 }
 
@@ -153,38 +157,32 @@ async function rankingRows(seasonId?: string): Promise<ExportRow[]> {
 
 async function activityRows(activityId?: string): Promise<ExportRow[]> {
   if (!activityId) {
-    const activities = await prisma.activity.findMany({
-      include: {
-        season: true,
-        _count: { select: { attendances: true } },
-      },
-      orderBy: { startsAt: "desc" },
-    });
+    const activities = await db.orm.public.Activity.include("season")
+      .include("attendances", (attendances) => attendances.count())
+      .orderBy((activity) => activity.startsAt.desc())
+      .all();
     return activities.map((activity) => ({
       nombre: activity.name,
       publicId: activity.publicId,
-      temporada: activity.season.name,
+      temporada: String(activity.season.name),
       estado: activity.status,
       puntos: activity.individualPoints,
-      registros: activity._count.attendances,
-      inicio: activity.startsAt.toISOString(),
+      registros: activity.attendances,
+      inicio: toIso(activity.startsAt),
     }));
   }
 
-  const activity = await prisma.activity.findUnique({
-    where: { id: activityId },
-    include: { season: true },
-  });
+  const activity = await db.orm.public.Activity.where({ id: activityId }).include("season").first();
   if (!activity) return [];
   const attendances = await attendanceRows(activityId);
   return [
     {
       nombre: activity.name,
       publicId: activity.publicId,
-      temporada: activity.season.name,
+      temporada: String(activity.season.name),
       estado: activity.status,
       puntos: activity.individualPoints,
-      inicio: activity.startsAt.toISOString(),
+      inicio: toIso(activity.startsAt),
     },
     ...attendances,
   ];

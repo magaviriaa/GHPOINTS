@@ -16,6 +16,8 @@
     "out/**",
     "build/**",
     "node_modules/**",
+    "src/prisma/contract.d.ts",
+    "migrations/**",
     "src/components/ui/**"
   ],
   "jsPlugins": [

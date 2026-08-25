@@ -5,6 +5,7 @@ import { ClientForm, SubmitButton } from "@/components/forms/client-form";
 import { Field, NativeSelect } from "@/components/ui/field";
 import { CREDIT_STRATEGY, optionsOf } from "@/lib/labels";
 import { SectionHeader } from "@/components/ui-blocks";
+import { CreditStrategyMatrix } from "@/components/admin/credit-strategy-matrix";
 
 export default async function AdminSettingsPage() {
   const [strategy, config] = await Promise.all([getCreditStrategy(), listAppConfig()]);
@@ -17,9 +18,13 @@ export default async function AdminSettingsPage() {
       <section className="rounded-xl border bg-card p-4">
         <h2 className="font-display font-bold">Cómo se acredita a los comités</h2>
         <p className="mt-1 text-sm text-muted-foreground">
-          Define qué pasa cuando alguien pertenece a más de un comité. Cambia el cálculo de
-          participación de aquí en adelante; no reescribe lo ya cerrado.
+          Un integrante vigente está en 1, 2 o 3 comités. Los GH Points de la actividad van
+          enteros a esa persona. Aquí solo se decide cómo esa asistencia alimenta el score de
+          cada comité, con los comités que tenía el día del registro.
         </p>
+        <div className="mt-4">
+          <CreditStrategyMatrix current={strategy} />
+        </div>
         <ClientForm
           action={adminSaveConfigAction}
           className="mt-4 max-w-md space-y-4"

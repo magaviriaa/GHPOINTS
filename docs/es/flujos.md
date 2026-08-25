@@ -54,7 +54,7 @@ flowchart TD
   TX --> Notify["email + Teams"]
 ```
 
-- URL pública: `/a/{publicId}`. El id interno cuid no se expone en el QR (ADR-009).
+- URL pública: `/a/{publicId}`. El id interno no se expone en el QR (ADR-009).
 - **QR estático:** `APP_URL/a/{publicId}` generado en admin con la librería `qrcode`. Regenerar (`rotateActivityPublicId`) cambia `publicId` y archiva el anterior: el cartel viejo deja de resolver (`getActivityByPublicId` busca el vigente).
 - **QR dinámico:** admin activa token; el enlace es `/a/{publicId}?t={token}`. El estático **deja de registrar** (`assertAttendanceToken`). Rotar emite un token nuevo; el anterior falla el hash. El token no se vuelve a mostrar.
 - `approvalMode=AUTO`: status APPROVED y fila `ACTIVITY` en el ledger en la misma transacción.

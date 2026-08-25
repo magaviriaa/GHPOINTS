@@ -1,7 +1,8 @@
 import "server-only";
 
-import type { SeasonStatus } from "@prisma/client";
-import { prisma } from "@/server/db/prisma";
+import type { SeasonStatus } from "@/server/db/types";
+import { db } from "@/server/db/prisma";
+import { toDateOnly } from "@/server/db/time";
 import { DomainError, ErrorCodes } from "@/server/domain/errors";
 import { writeAuditLog } from "@/server/domain/audit";
 import { isUniqueConstraint } from "@/server/db/errors";
@@ -14,22 +15,18 @@ import {
 import { refreshBadges } from "@/server/domain/badges";
 
 export async function getActiveSeason() {
-  return prisma.season.findFirst({
-    where: { status: "ACTIVE" },
-  });
+  return db.orm.public.Season.where({ status: "ACTIVE" }).first();
 }
 
 export async function resolveSeason(seasonId?: string) {
   if (seasonId) {
-    return prisma.season.findUnique({ where: { id: seasonId } });
+    return db.orm.public.Season.first({ id: seasonId });
   }
   return getActiveSeason();
 }
 
 export async function listSeasons() {
-  return prisma.season.findMany({
-    orderBy: { startDate: "desc" },
-  });
+  return db.orm.public.Season.orderBy((season) => season.startDate.desc()).all();
 }
 
 export async function createSeason(input: {
@@ -42,13 +39,11 @@ export async function createSeason(input: {
 }) {
   requireAdmin(input.actor);
   try {
-    const season = await prisma.season.create({
-      data: {
-        name: input.name.trim(),
-        startDate: input.startDate,
-        endDate: input.endDate,
-        status: input.status ?? "UPCOMING",
-      },
+    const season = await db.orm.public.Season.create({
+      name: input.name.trim(),
+      startDate: toDateOnly(input.startDate),
+      endDate: toDateOnly(input.endDate),
+      status: input.status ?? "UPCOMING",
     });
     await writeAuditLog({
       actorId: input.actor.id,
@@ -78,7 +73,7 @@ export async function updateSeasonStatus(input: {
   ip?: string | null;
 }) {
   requireAdmin(input.actor);
-  const current = await prisma.season.findUnique({ where: { id: input.seasonId } });
+  const current = await db.orm.public.Season.first({ id: input.seasonId });
   if (!current) {
     throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos esa temporada.", 404);
   }
@@ -87,11 +82,13 @@ export async function updateSeasonStatus(input: {
     const snapshot =
       input.status === "CLOSED" ? await buildHallOfFameSnapshot(current.id) : null;
 
-    const season = await prisma.$transaction(async (tx) => {
-      const updated = await tx.season.update({
-        where: { id: input.seasonId },
-        data: { status: input.status },
+    const season = await db.transaction(async (tx) => {
+      const updated = await tx.orm.public.Season.where({ id: input.seasonId }).update({
+        status: input.status,
       });
+      if (!updated) {
+        throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos esa temporada.", 404);
+      }
       if (snapshot) {
         await persistHallOfFameSnapshot(tx, updated.id, snapshot);
       }

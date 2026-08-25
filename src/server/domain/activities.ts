@@ -1,8 +1,9 @@
 import "server-only";
 
 import { z } from "zod";
-import type { ActivityStatus, ActivityType, ApprovalMode } from "@prisma/client";
-import { prisma } from "@/server/db/prisma";
+import type { ActivityStatus, ActivityType, ApprovalMode } from "@/server/db/types";
+import { db } from "@/server/db/prisma";
+import { isoNow, toDate, toIso } from "@/server/db/time";
 import { createPublicId } from "@/lib/public-id";
 import { DomainError, ErrorCodes } from "@/server/domain/errors";
 import { writeAuditLog } from "@/server/domain/audit";
@@ -22,16 +23,16 @@ const activityFieldsSchema = z
   .object({
     name: z.string().trim().min(1, "El nombre de la actividad es obligatorio."),
     individualPoints: z
-      .number({ invalid_type_error: "Los GH Points deben ser un número." })
+      .number({ error: "Los GH Points deben ser un número." })
       .int("Los GH Points deben ser un número entero.")
       .min(0, "Los GH Points no pueden ser negativos.")
       .max(MAX_INDIVIDUAL_POINTS, `Los GH Points no pueden superar ${MAX_INDIVIDUAL_POINTS}.`),
-    startsAt: z.date({ invalid_type_error: "La fecha de la actividad no es válida." }),
+    startsAt: z.date({ error: "La fecha de la actividad no es válida." }),
     registrationStart: z.date({
-      invalid_type_error: "La apertura del registro no es una fecha válida.",
+      error: "La apertura del registro no es una fecha válida.",
     }),
     registrationEnd: z.date({
-      invalid_type_error: "El cierre del registro no es una fecha válida.",
+      error: "El cierre del registro no es una fecha válida.",
     }),
   })
   .refine((fields) => fields.registrationStart <= fields.registrationEnd, {
@@ -57,43 +58,54 @@ export function parseActivityFields(fields: {
   );
 }
 
+function withAttendanceCount<T extends { attendances: number }>(row: T) {
+  return { ...row, _count: { attendances: row.attendances } };
+}
+
+function requireActivity<T>(row: T | null): T {
+  if (!row) {
+    throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos esa actividad.", 404);
+  }
+  return row;
+}
+
 export async function listActivities(filters?: {
   seasonId?: string;
   status?: ActivityStatus;
 }) {
   const seasonId = filters?.seasonId ?? (await getActiveSeason())?.id;
   if (!seasonId) return [];
-  return prisma.activity.findMany({
-    where: {
-      seasonId,
-      status: filters?.status,
-    },
-    include: {
-      _count: { select: { attendances: true } },
-      season: true,
-    },
-    orderBy: { startsAt: "desc" },
-  });
+
+  let collection = db.orm.public.Activity.where({ seasonId });
+  if (filters?.status) {
+    collection = collection.where({ status: filters.status });
+  }
+
+  const rows = await collection
+    .include("attendances", (attendances) => attendances.count())
+    .include("season")
+    .orderBy((activity) => activity.startsAt.desc())
+    .all();
+
+  return rows.map(withAttendanceCount);
 }
 
 export async function getActivityByPublicId(publicId: string) {
-  return prisma.activity.findUnique({
-    where: { publicId },
-    include: { season: true },
-  });
+  return db.orm.public.Activity.where({ publicId }).include("season").first();
 }
 
 export async function getActivityById(id: string) {
-  return prisma.activity.findUnique({
-    where: { id },
-    include: {
-      season: true,
-      committee: { select: { id: true, name: true, slug: true } },
-      createdBy: { select: { fullName: true } },
-      publicIdHistory: { orderBy: { retiredAt: "desc" }, take: 12 },
-      _count: { select: { attendances: true } },
-    },
-  });
+  const activity = await db.orm.public.Activity.where({ id })
+    .include("season")
+    .include("committee", (committee) => committee.select("id", "name", "slug"))
+    .include("createdBy", (member) => member.select("fullName"))
+    .include("publicIdHistory", (history) =>
+      history.orderBy((row) => row.retiredAt.desc()).limit(12)
+    )
+    .include("attendances", (attendances) => attendances.count())
+    .first();
+  if (!activity) return null;
+  return withAttendanceCount(activity);
 }
 
 export async function createActivity(input: {
@@ -134,7 +146,7 @@ export async function proposeActivity(input: {
   ip?: string | null;
 }) {
   requireCommitteeLeader(input.actor, input.committeeId);
-  const committee = await prisma.committee.findUnique({ where: { id: input.committeeId } });
+  const committee = await db.orm.public.Committee.first({ id: input.committeeId });
   if (!committee || committee.status !== "ACTIVE") {
     throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos ese comité.", 404);
   }
@@ -176,23 +188,21 @@ async function insertActivity(input: {
     registrationEnd: input.registrationEnd,
   });
 
-  const activity = await prisma.activity.create({
-    data: {
-      publicId: createPublicId(),
-      seasonId: season.id,
-      name: fields.name,
-      description: input.description?.trim() || null,
-      activityType: input.activityType ?? "GENERAL",
-      startsAt: fields.startsAt,
-      registrationStart: fields.registrationStart,
-      registrationEnd: fields.registrationEnd,
-      individualPoints: fields.individualPoints,
-      approvalMode: input.approvalMode ?? "AUTO",
-      status: input.status,
-      committeeId: input.committeeId ?? null,
-      needsApproval: input.needsApproval,
-      createdById: input.actor.id,
-    },
+  const activity = await db.orm.public.Activity.create({
+    publicId: createPublicId(),
+    seasonId: season.id,
+    name: fields.name,
+    description: input.description?.trim() || null,
+    activityType: input.activityType ?? "GENERAL",
+    startsAt: toIso(fields.startsAt),
+    registrationStart: toIso(fields.registrationStart),
+    registrationEnd: toIso(fields.registrationEnd),
+    individualPoints: fields.individualPoints,
+    approvalMode: input.approvalMode ?? "AUTO",
+    status: input.status,
+    committeeId: input.committeeId ?? null,
+    needsApproval: input.needsApproval,
+    createdById: input.actor.id,
   });
 
   await writeAuditLog({
@@ -225,10 +235,9 @@ export async function updateActivity(input: {
   ip?: string | null;
 }) {
   requireAdmin(input.actor);
-  const current = await prisma.activity.findUnique({
-    where: { id: input.activityId },
-    include: { season: true },
-  });
+  const current = await db.orm.public.Activity.where({ id: input.activityId })
+    .include("season")
+    .first();
   if (!current) {
     throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos esa actividad.", 404);
   }
@@ -236,25 +245,23 @@ export async function updateActivity(input: {
   const fields = parseActivityFields({
     name: input.name ?? current.name,
     individualPoints: input.individualPoints ?? current.individualPoints,
-    startsAt: input.startsAt ?? current.startsAt,
-    registrationStart: input.registrationStart ?? current.registrationStart,
-    registrationEnd: input.registrationEnd ?? current.registrationEnd,
+    startsAt: input.startsAt ?? toDate(current.startsAt),
+    registrationStart: input.registrationStart ?? toDate(current.registrationStart),
+    registrationEnd: input.registrationEnd ?? toDate(current.registrationEnd),
   });
 
-  const activity = await prisma.activity.update({
-    where: { id: input.activityId },
-    data: {
+  const activity = requireActivity(
+    await db.orm.public.Activity.where({ id: input.activityId }).update({
       name: fields.name,
-      description:
-        input.description === undefined ? current.description : input.description,
-      startsAt: fields.startsAt,
-      registrationStart: fields.registrationStart,
-      registrationEnd: fields.registrationEnd,
+      description: input.description === undefined ? current.description : input.description,
+      startsAt: toIso(fields.startsAt),
+      registrationStart: toIso(fields.registrationStart),
+      registrationEnd: toIso(fields.registrationEnd),
       individualPoints: fields.individualPoints,
       approvalMode: input.approvalMode ?? current.approvalMode,
       status: input.status ?? current.status,
-    },
-  });
+    })
+  );
 
   await writeAuditLog({
     actorId: input.actor.id,
@@ -284,19 +291,21 @@ export async function rotateActivityPublicId(input: {
   ip?: string | null;
 }) {
   requireAdmin(input.actor);
-  const current = await prisma.activity.findUnique({ where: { id: input.activityId } });
+  const current = await db.orm.public.Activity.first({ id: input.activityId });
   if (!current) {
     throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos esa actividad.", 404);
   }
   const nextPublicId = createPublicId();
-  const activity = await prisma.$transaction(async (tx) => {
-    await tx.activityPublicIdHistory.create({
-      data: { activityId: current.id, publicId: current.publicId },
+  const activity = await db.transaction(async (tx) => {
+    await tx.orm.public.ActivityPublicIdHistory.create({
+      activityId: current.id,
+      publicId: current.publicId,
     });
-    return tx.activity.update({
-      where: { id: input.activityId },
-      data: { publicId: nextPublicId },
-    });
+    return requireActivity(
+      await tx.orm.public.Activity.where({ id: input.activityId }).update({
+        publicId: nextPublicId,
+      })
+    );
   });
   await writeAuditLog({
     actorId: input.actor.id,
@@ -316,7 +325,7 @@ export async function publishProposedActivity(input: {
   ip?: string | null;
 }) {
   requireAdmin(input.actor);
-  const current = await prisma.activity.findUnique({ where: { id: input.activityId } });
+  const current = await db.orm.public.Activity.first({ id: input.activityId });
   if (!current) {
     throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos esa actividad.", 404);
   }
@@ -327,10 +336,12 @@ export async function publishProposedActivity(input: {
       400
     );
   }
-  const activity = await prisma.activity.update({
-    where: { id: current.id },
-    data: { status: "OPEN", needsApproval: false },
-  });
+  const activity = requireActivity(
+    await db.orm.public.Activity.where({ id: current.id }).update({
+      status: "OPEN",
+      needsApproval: false,
+    })
+  );
   await writeAuditLog({
     actorId: input.actor.id,
     action: "ACTIVITY_PROPOSAL_APPROVED",
@@ -349,7 +360,7 @@ export async function rejectProposedActivity(input: {
   ip?: string | null;
 }) {
   requireAdmin(input.actor);
-  const current = await prisma.activity.findUnique({ where: { id: input.activityId } });
+  const current = await db.orm.public.Activity.first({ id: input.activityId });
   if (!current) {
     throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos esa actividad.", 404);
   }
@@ -360,10 +371,12 @@ export async function rejectProposedActivity(input: {
       400
     );
   }
-  const activity = await prisma.activity.update({
-    where: { id: current.id },
-    data: { status: "CANCELLED", needsApproval: false },
-  });
+  const activity = requireActivity(
+    await db.orm.public.Activity.where({ id: current.id }).update({
+      status: "CANCELLED",
+      needsApproval: false,
+    })
+  );
   await writeAuditLog({
     actorId: input.actor.id,
     action: "ACTIVITY_PROPOSAL_REJECTED",
@@ -379,23 +392,24 @@ export async function rejectProposedActivity(input: {
 export async function listProposedActivities(seasonId?: string) {
   const resolvedSeasonId = seasonId ?? (await getActiveSeason())?.id;
   if (!resolvedSeasonId) return [];
-  return prisma.activity.findMany({
-    where: { seasonId: resolvedSeasonId, needsApproval: true, status: "DRAFT" },
-    include: {
-      committee: { select: { name: true, slug: true } },
-      createdBy: { select: { fullName: true } },
-    },
-    orderBy: { createdAt: "asc" },
-  });
+  return db.orm.public.Activity.where({
+    seasonId: resolvedSeasonId,
+    needsApproval: true,
+    status: "DRAFT",
+  })
+    .include("committee", (committee) => committee.select("name", "slug"))
+    .include("createdBy", (member) => member.select("fullName"))
+    .orderBy((activity) => activity.createdAt.asc())
+    .all();
 }
 
 export async function listLeaderProposedActivities(actor: Actor, committeeId: string) {
   requireCommitteeLeader(actor, committeeId);
-  return prisma.activity.findMany({
-    where: { committeeId, createdById: isAdmin(actor) ? undefined : actor.id },
-    orderBy: { createdAt: "desc" },
-    take: 20,
-  });
+  let collection = db.orm.public.Activity.where({ committeeId });
+  if (!isAdmin(actor)) {
+    collection = collection.where({ createdById: actor.id });
+  }
+  return collection.orderBy((activity) => activity.createdAt.desc()).limit(20).all();
 }
 
 export async function rotateAttendanceToken(input: {
@@ -405,18 +419,17 @@ export async function rotateAttendanceToken(input: {
   ip?: string | null;
 }) {
   requireAdmin(input.actor);
-  const current = await prisma.activity.findUnique({ where: { id: input.activityId } });
+  const current = await db.orm.public.Activity.first({ id: input.activityId });
   if (!current) {
     throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos esa actividad.", 404);
   }
   const token = generateAttendanceToken();
-  const activity = await prisma.activity.update({
-    where: { id: current.id },
-    data: {
+  const activity = requireActivity(
+    await db.orm.public.Activity.where({ id: current.id }).update({
       requireAttendanceToken: input.enable ?? true,
       attendanceTokenHash: hashAttendanceToken(current.id, token),
-    },
-  });
+    })
+  );
   await writeAuditLog({
     actorId: input.actor.id,
     action: "ACTIVITY_TOKEN_ROTATED",
@@ -434,14 +447,16 @@ export async function disableAttendanceToken(input: {
   ip?: string | null;
 }) {
   requireAdmin(input.actor);
-  const current = await prisma.activity.findUnique({ where: { id: input.activityId } });
+  const current = await db.orm.public.Activity.first({ id: input.activityId });
   if (!current) {
     throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos esa actividad.", 404);
   }
-  const activity = await prisma.activity.update({
-    where: { id: current.id },
-    data: { requireAttendanceToken: false, attendanceTokenHash: null },
-  });
+  const activity = requireActivity(
+    await db.orm.public.Activity.where({ id: current.id }).update({
+      requireAttendanceToken: false,
+      attendanceTokenHash: null,
+    })
+  );
   await writeAuditLog({
     actorId: input.actor.id,
     action: "ACTIVITY_TOKEN_DISABLED",
@@ -490,17 +505,13 @@ const MEMBER_VISIBLE_STATUSES: ActivityStatus[] = [
 export async function listPublishedActivities(seasonId?: string) {
   const resolvedSeasonId = seasonId ?? (await getActiveSeason())?.id;
   if (!resolvedSeasonId) return [];
-  return prisma.activity.findMany({
-    where: {
-      seasonId: resolvedSeasonId,
-      status: { in: MEMBER_VISIBLE_STATUSES },
-    },
-    include: {
-      _count: { select: { attendances: true } },
-      season: true,
-    },
-    orderBy: { startsAt: "desc" },
-  });
+  const rows = await db.orm.public.Activity.where({ seasonId: resolvedSeasonId })
+    .where((activity) => activity.status.in(MEMBER_VISIBLE_STATUSES))
+    .include("attendances", (attendances) => attendances.count())
+    .include("season")
+    .orderBy((activity) => activity.startsAt.desc())
+    .all();
+  return rows.map(withAttendanceCount);
 }
 
 export async function getPublishedActivityById(id: string) {
@@ -511,15 +522,14 @@ export async function getPublishedActivityById(id: string) {
 }
 
 export async function getNextOpenActivity() {
-  return prisma.activity.findFirst({
-    where: { status: "OPEN", startsAt: { gte: new Date() } },
-    orderBy: { startsAt: "asc" },
-  });
+  return db.orm.public.Activity.where({ status: "OPEN" })
+    .where((activity) => activity.startsAt.gte(isoNow()))
+    .orderBy((activity) => activity.startsAt.asc())
+    .first();
 }
 
 export async function getOpenActivities() {
-  return prisma.activity.findMany({
-    where: { status: "OPEN" },
-    orderBy: { startsAt: "asc" },
-  });
+  return db.orm.public.Activity.where({ status: "OPEN" })
+    .orderBy((activity) => activity.startsAt.asc())
+    .all();
 }

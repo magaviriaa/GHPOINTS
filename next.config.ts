@@ -22,10 +22,11 @@ const securityHeaders = [
 ];
 
 const nextConfig: NextConfig = {
-  serverExternalPackages: ["@prisma/client", "prisma"],
+  serverExternalPackages: ["@prisma/orm-postgres", "pg", "prisma"],
   turbopack: {
     root: path.resolve(__dirname),
   },
+  agentRules: false,
   async headers() {
     return [{ source: "/:path*", headers: securityHeaders }];
   },

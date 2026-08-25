@@ -1,12 +1,13 @@
 import "server-only";
 
+import { and } from "@prisma/orm-postgres/orm-client";
 import type {
   ActivityStatus,
   AttendanceSource,
   AttendanceStatus,
-  Prisma,
-} from "@prisma/client";
-import { prisma } from "@/server/db/prisma";
+} from "@/server/db/types";
+import { db, type Tx } from "@/server/db/prisma";
+import { toDate, toIso } from "@/server/db/time";
 import { isUniqueConstraint } from "@/server/db/errors";
 import { DomainError, ErrorCodes } from "@/server/domain/errors";
 import {
@@ -25,8 +26,6 @@ import type { Actor } from "@/server/domain/authorization";
 import { requireAdmin } from "@/server/domain/authorization";
 import { dispatchAppEvent } from "@/server/notify/events";
 
-type TransactionClient = Prisma.TransactionClient;
-
 type AttendanceWithActivity = {
   id: string;
   memberId: string;
@@ -35,9 +34,24 @@ type AttendanceWithActivity = {
   activity: AttendanceCreditActivity;
 };
 
-function assertRegistrationWindow(now: Date, start: Date, end: Date, bypass: boolean) {
+type AttendanceStatusPatch = {
+  status: AttendanceStatus;
+  approvedAt?: string | null;
+  approvedById?: string | null;
+  cancelledAt?: string | null;
+  cancelReason?: string | null;
+};
+
+function assertRegistrationWindow(
+  now: Date,
+  start: Date | string,
+  end: Date | string,
+  bypass: boolean
+) {
   if (bypass) return;
-  if (now < start || now > end) {
+  const startAt = toDate(start);
+  const endAt = toDate(end);
+  if (now < startAt || now > endAt) {
     throw new DomainError(
       ErrorCodes.REGISTRATION_CLOSED,
       "El registro para esta actividad está cerrado.",
@@ -59,12 +73,12 @@ function attendanceStatusPatch(
   actorId: string,
   now: Date,
   reason?: string
-): Prisma.AttendanceUncheckedUpdateInput {
+): AttendanceStatusPatch {
   switch (to) {
     case "APPROVED":
       return {
         status: "APPROVED",
-        approvedAt: now,
+        approvedAt: toIso(now),
         approvedById: actorId,
         cancelledAt: null,
         cancelReason: null,
@@ -74,7 +88,7 @@ function attendanceStatusPatch(
     case "CANCELLED":
       return {
         status: "CANCELLED",
-        cancelledAt: now,
+        cancelledAt: toIso(now),
         cancelReason: reason ?? null,
       };
     case "PENDING":
@@ -107,7 +121,7 @@ function creditReversalReason(
 }
 
 async function insertAttendanceWithCredit(
-  tx: TransactionClient,
+  tx: Tx,
   input: {
     activity: AttendanceCreditActivity;
     memberId: string;
@@ -118,16 +132,14 @@ async function insertAttendanceWithCredit(
   }
 ) {
   const status: AttendanceStatus = input.autoApprove ? "APPROVED" : "PENDING";
-  const created = await tx.attendance.create({
-    data: {
-      activityId: input.activity.id,
-      memberId: input.memberId,
-      status,
-      registeredAt: input.now,
-      approvedAt: input.autoApprove ? input.now : null,
-      approvedById: input.autoApprove ? input.actorId : null,
-      source: input.source,
-    },
+  const created = await tx.orm.public.Attendance.create({
+    activityId: input.activity.id,
+    memberId: input.memberId,
+    status,
+    registeredAt: toIso(input.now),
+    approvedAt: input.autoApprove ? toIso(input.now) : null,
+    approvedById: input.autoApprove ? input.actorId : null,
+    source: input.source,
   });
 
   await syncAttendanceCredit(tx, {
@@ -142,7 +154,7 @@ async function insertAttendanceWithCredit(
 }
 
 async function applyAttendanceStatus(
-  tx: TransactionClient,
+  tx: Tx,
   input: {
     attendance: AttendanceWithActivity;
     to: AttendanceStatus;
@@ -153,10 +165,12 @@ async function applyAttendanceStatus(
 ) {
   assertAttendanceTransition(input.attendance.status, input.to);
 
-  const updated = await tx.attendance.update({
-    where: { id: input.attendance.id },
-    data: attendanceStatusPatch(input.to, input.actorId, input.now, input.reason),
-  });
+  const updated = await tx.orm.public.Attendance.where({ id: input.attendance.id }).update(
+    attendanceStatusPatch(input.to, input.actorId, input.now, input.reason)
+  );
+  if (!updated) {
+    throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos esa asistencia.", 404);
+  }
 
   await syncAttendanceCredit(tx, {
     attendanceId: input.attendance.id,
@@ -171,7 +185,7 @@ async function applyAttendanceStatus(
 }
 
 export async function upsertApprovedAttendance(
-  tx: TransactionClient,
+  tx: Tx,
   input: {
     activity: AttendanceCreditActivity;
     memberId: string;
@@ -180,33 +194,30 @@ export async function upsertApprovedAttendance(
     source?: AttendanceSource;
   }
 ) {
-  const existing = await tx.attendance.findUnique({
-    where: {
-      activityId_memberId: { activityId: input.activity.id, memberId: input.memberId },
-    },
-  });
+  const existing = await tx.orm.public.Attendance.where({
+    activityId: input.activity.id,
+    memberId: input.memberId,
+  }).first();
   if (existing) {
     assertAttendanceTransition(existing.status, "APPROVED");
   }
 
-  const attendance = await tx.attendance.upsert({
-    where: {
-      activityId_memberId: { activityId: input.activity.id, memberId: input.memberId },
-    },
-    update: {
-      status: "APPROVED",
-      approvedAt: input.now,
-      approvedById: input.actorId,
-    },
+  const attendance = await tx.orm.public.Attendance.upsert({
     create: {
       activityId: input.activity.id,
       memberId: input.memberId,
       status: "APPROVED",
-      registeredAt: input.now,
-      approvedAt: input.now,
+      registeredAt: toIso(input.now),
+      approvedAt: toIso(input.now),
       approvedById: input.actorId,
       source: input.source ?? "ADMIN",
     },
+    update: {
+      status: "APPROVED",
+      approvedAt: toIso(input.now),
+      approvedById: input.actorId,
+    },
+    conflictOn: { activityId: input.activity.id, memberId: input.memberId },
   });
 
   await syncAttendanceCredit(tx, {
@@ -242,10 +253,9 @@ export async function registerAttendance(input: {
   token?: string | null;
   source: Extract<AttendanceSource, "QR" | "LINK">;
 }) {
-  const activity = await prisma.activity.findFirst({
-    where: input.activityId ? { id: input.activityId } : { publicId: input.publicId },
-    include: { season: true },
-  });
+  const activity = input.activityId
+    ? await db.orm.public.Activity.where({ id: input.activityId }).include("season").first()
+    : await db.orm.public.Activity.where({ publicId: input.publicId }).include("season").first();
 
   if (!activity) {
     throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos esa actividad.", 404);
@@ -280,8 +290,8 @@ export async function registerAttendance(input: {
   const now = new Date();
   assertRegistrationWindow(now, activity.registrationStart, activity.registrationEnd, false);
 
-  const attendance = await prisma
-    .$transaction((tx) =>
+  const attendance = await db
+    .transaction((tx) =>
       insertAttendanceWithCredit(tx, {
         activity,
         memberId: input.actor.id,
@@ -318,23 +328,22 @@ export async function adminRegisterAttendance(input: {
 }) {
   requireAdmin(input.actor);
 
-  const activity = await prisma.activity.findUnique({
-    where: { id: input.activityId },
-    include: { season: true },
-  });
+  const activity = await db.orm.public.Activity.where({ id: input.activityId })
+    .include("season")
+    .first();
   if (!activity) {
     throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos esa actividad.", 404);
   }
 
-  const member = await prisma.member.findUnique({ where: { id: input.memberId } });
+  const member = await db.orm.public.Member.first({ id: input.memberId });
   if (!member) {
     throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos ese integrante.", 404);
   }
 
   const now = new Date();
 
-  const attendance = await prisma
-    .$transaction((tx) =>
+  const attendance = await db
+    .transaction((tx) =>
       insertAttendanceWithCredit(tx, {
         activity,
         memberId: member.id,
@@ -391,10 +400,12 @@ async function notifyApproved(
   }>
 ) {
   const memberIds = Array.from(new Set(rows.map((row) => row.memberId)));
-  const members = await prisma.member.findMany({
-    where: { id: { in: memberIds } },
-    select: { id: true, institutionalEmail: true, fullName: true },
-  });
+  const members =
+    memberIds.length === 0
+      ? []
+      : await db.orm.public.Member.where((member) => member.id.in(memberIds))
+          .select("id", "institutionalEmail", "fullName")
+          .all();
   const byId = new Map(members.map((member) => [member.id, member]));
 
   for (const row of rows) {
@@ -433,10 +444,11 @@ export async function decideAttendance(input: {
     throw new DomainError(ErrorCodes.REASON_REQUIRED, "Indica un motivo para anular.", 400);
   }
 
-  const attendances = await prisma.attendance.findMany({
-    where: { id: { in: uniqueIds } },
-    include: { activity: true },
-  });
+  const attendances = await db.orm.public.Attendance.where((row) => row.id.in(uniqueIds))
+    .include("activity", (activity) =>
+      activity.select("id", "seasonId", "name", "individualPoints")
+    )
+    .all();
   const byId = new Map(attendances.map((row) => [row.id, row]));
   const ordered = uniqueIds.map((attendanceId) => {
     const attendance = byId.get(attendanceId);
@@ -448,7 +460,7 @@ export async function decideAttendance(input: {
   });
 
   const now = new Date();
-  const results = await prisma.$transaction(async (tx) => {
+  const results = await db.transaction(async (tx) => {
     const updated = [];
     for (const attendance of ordered) {
       updated.push(
@@ -488,66 +500,90 @@ export async function listActivityAttendances(
   activityId: string,
   filters?: {
     query?: string;
-    status?: Prisma.AttendanceWhereInput["status"];
+    status?: AttendanceStatus;
     committeeId?: string;
   }
 ) {
-  return prisma.attendance.findMany({
-    where: {
-      activityId,
-      status: filters?.status,
-      member: {
-        fullName: filters?.query
-          ? { contains: filters.query, mode: "insensitive" }
-          : undefined,
-        committees: filters?.committeeId
-          ? { some: { committeeId: filters.committeeId, isActive: true } }
-          : undefined,
-      },
-    },
-    include: {
-      member: {
-        include: {
-          committees: {
-            where: { isActive: true },
-            include: { committee: true },
-          },
-        },
-      },
-    },
-    orderBy: { registeredAt: "desc" },
-  });
+  let memberIds: string[] | undefined;
+  if (filters?.query || filters?.committeeId) {
+    let members = db.orm.public.Member.select("id");
+    if (filters.query) {
+      members = members.where((member) => member.fullName.ilike(`%${filters.query}%`));
+    }
+    if (filters.committeeId) {
+      const committeeId = filters.committeeId;
+      members = members.where((member) =>
+        member.committees.some((membership) =>
+          and(membership.committeeId.eq(committeeId), membership.isActive.eq(true))
+        )
+      );
+    }
+    const matched = await members.all();
+    memberIds = matched.map((member) => member.id);
+    if (memberIds.length === 0) return [];
+  }
+
+  let collection = db.orm.public.Attendance.where({ activityId })
+    .include("member", (member) =>
+      member
+        .select("id", "fullName")
+        .include("committees", (committees) =>
+          committees
+            .where({ isActive: true })
+            .select("id", "committeeId")
+            .include("committee", (committee) => committee.select("id", "name"))
+        )
+    )
+    .orderBy((row) => row.registeredAt.desc());
+
+  if (filters?.status) {
+    collection = collection.where({ status: filters.status });
+  }
+  if (memberIds) {
+    collection = collection.where((row) => row.memberId.in(memberIds));
+  }
+
+  return collection.all();
 }
 
 export function isRegistrationOpen(
-  activity: { status: ActivityStatus; registrationStart: Date; registrationEnd: Date },
+  activity: {
+    status: ActivityStatus;
+    registrationStart: Date | string;
+    registrationEnd: Date | string;
+  },
   now = new Date()
 ): boolean {
   return (
     activity.status === "OPEN" &&
-    now >= activity.registrationStart &&
-    now <= activity.registrationEnd
+    now >= toDate(activity.registrationStart) &&
+    now <= toDate(activity.registrationEnd)
   );
 }
 
 export async function countApprovedAttendances(activityId: string) {
-  return prisma.attendance.count({
-    where: { activityId, status: "APPROVED" },
-  });
+  const { total } = await db.orm.public.Attendance.where({
+    activityId,
+    status: "APPROVED",
+  }).aggregate((aggregate) => ({ total: aggregate.count() }));
+  return total;
 }
 
 export async function listPendingAttendances(seasonId?: string) {
-  return prisma.attendance.findMany({
-    where: {
-      status: "PENDING",
-      activity: { seasonId },
-    },
-    include: {
-      member: true,
-      activity: true,
-    },
-    orderBy: { registeredAt: "desc" },
-  });
+  let collection = db.orm.public.Attendance.where({ status: "PENDING" })
+    .select("id", "registeredAt", "source", "activityId", "memberId")
+    .include("member", (member) => member.select("id", "fullName"))
+    .include("activity", (activity) => activity.select("id", "name"))
+    .orderBy((row) => row.registeredAt.desc());
+
+  if (seasonId) {
+    const activities = await db.orm.public.Activity.where({ seasonId }).select("id").all();
+    const activityIds = activities.map((activity) => activity.id);
+    if (activityIds.length === 0) return [];
+    collection = collection.where((row) => row.activityId.in(activityIds));
+  }
+
+  return collection.all();
 }
 
 export async function getPublicActivityRegistration(
@@ -559,9 +595,7 @@ export async function getPublicActivityRegistration(
   if (!activity) return null;
 
   const [attendance, memberships] = await Promise.all([
-    prisma.attendance.findUnique({
-      where: { activityId_memberId: { activityId: activity.id, memberId } },
-    }),
+    db.orm.public.Attendance.where({ activityId: activity.id, memberId }).first(),
     listActiveMemberships(memberId),
   ]);
 

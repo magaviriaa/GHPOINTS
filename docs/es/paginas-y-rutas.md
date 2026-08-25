@@ -110,7 +110,7 @@ No hay `/admin/login`: el login unificado es `/login`.
 | `components/ui/disclosure.tsx` | `<details>` uniforme de los formularios de creación |
 | `components/ui/*` | Primitivos shadcn (Button, Input, Tabs, …) |
 
-Convenciones de presentación: ningún enum de Prisma se muestra crudo — todo pasa por `src/lib/labels.ts`. Los metales de nivel salen de `src/lib/level-style.ts`. La dirección visual está en [diseno.md](./diseno.md).
+Convenciones de presentación: ningún enum del contrato se muestra crudo — todo pasa por `src/lib/labels.ts`. Los metales de nivel salen de `src/lib/level-style.ts`. La dirección visual está en [diseno.md](./diseno.md).
 
 ## Layout raíz
 

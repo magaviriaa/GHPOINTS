@@ -1,7 +1,8 @@
 import "server-only";
 
-import type { PointTransactionType } from "@prisma/client";
-import { prisma } from "@/server/db/prisma";
+import type { PointTransactionType } from "@/server/db/types";
+import { db } from "@/server/db/prisma";
+import { toDate } from "@/server/db/time";
 import { DomainError, ErrorCodes } from "@/server/domain/errors";
 import { writeAuditLog } from "@/server/domain/audit";
 import { createManualPoints, reverseTransaction } from "@/server/domain/points";
@@ -30,17 +31,16 @@ export async function assignManualPoints(input: {
     throw new DomainError(ErrorCodes.SEASON_CLOSED, "Esta temporada ya está cerrada.", 400);
   }
 
-  const member = await prisma.member.findUnique({ where: { id: input.memberId } });
+  const member = await db.orm.public.Member.first({ id: input.memberId });
   if (!member) {
     throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos ese integrante.", 404);
   }
 
   const inferredType =
-    input.type ??
-    (input.points < 0 ? "PENALTY" : "MANUAL_ADJUSTMENT");
+    input.type ?? (input.points < 0 ? "PENALTY" : "MANUAL_ADJUSTMENT");
 
-  const tx = await prisma.$transaction((prismaTx) =>
-    createManualPoints(prismaTx, {
+  const tx = await db.transaction((dbTx) =>
+    createManualPoints(dbTx, {
       memberId: member.id,
       seasonId: season.id,
       points: input.points,
@@ -69,8 +69,8 @@ export async function reversePoints(input: {
   ip?: string | null;
 }) {
   requireAdmin(input.actor);
-  const reversal = await prisma.$transaction((prismaTx) =>
-    reverseTransaction(prismaTx, {
+  const reversal = await db.transaction((dbTx) =>
+    reverseTransaction(dbTx, {
       originalId: input.transactionId,
       createdById: input.actor.id,
       reason: input.reason,
@@ -96,13 +96,13 @@ export async function bulkAwardActivity(input: {
 }) {
   requireAdmin(input.actor);
   const uniqueIds = Array.from(new Set(input.memberIds));
-  const activity = await prisma.activity.findUnique({ where: { id: input.activityId } });
+  const activity = await db.orm.public.Activity.first({ id: input.activityId });
   if (!activity) {
     throw new DomainError(ErrorCodes.NOT_FOUND, "No encontramos esa actividad.", 404);
   }
 
   const now = new Date();
-  await prisma.$transaction(async (tx) => {
+  await db.transaction(async (tx) => {
     for (const memberId of uniqueIds) {
       await upsertApprovedAttendance(tx, {
         activity,
@@ -131,17 +131,25 @@ export async function listPointTransactions(filters: {
   take?: number;
 }) {
   const seasonId = (await resolveSeason(filters.seasonId))?.id;
-  return prisma.pointTransaction.findMany({
-    where: {
-      seasonId: seasonId ?? undefined,
-      memberId: filters.memberId,
-    },
-    include: {
-      member: { select: { fullName: true, institutionalEmail: true } },
-      activity: { select: { name: true } },
-      createdBy: { select: { fullName: true } },
-    },
-    orderBy: { createdAt: "desc" },
-    take: filters.take ?? 100,
-  });
+  let collection = db.orm.public.PointTransaction.include("member", (member) =>
+    member.select("fullName", "institutionalEmail")
+  )
+    .include("activity", (activity) => activity.select("name"))
+    .include("createdBy", (createdBy) => createdBy.select("fullName"));
+
+  if (seasonId) {
+    collection = collection.where({ seasonId });
+  }
+  if (filters.memberId) {
+    collection = collection.where({ memberId: filters.memberId });
+  }
+
+  const rows = await collection
+    .orderBy((row) => row.createdAt.desc())
+    .limit(filters.take ?? 100)
+    .all();
+  return rows.map((row) => ({
+    ...row,
+    createdAt: toDate(row.createdAt),
+  }));
 }

@@ -4,7 +4,7 @@ import { listMembers } from "@/server/domain/members";
 import { listCommittees } from "@/server/domain/committees";
 import { adminCreateMemberAction } from "@/server/actions/admin";
 import { ClientForm, SubmitButton } from "@/components/forms/client-form";
-import { CheckChip, Field, NativeSelect } from "@/components/ui/field";
+import { Field, NativeSelect } from "@/components/ui/field";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Disclosure } from "@/components/ui/disclosure";
@@ -13,23 +13,31 @@ import { StatusBadge } from "@/components/ui/status-badge";
 import { MEMBER_STATUS, MEMBER_TYPE, optionsOf } from "@/lib/labels";
 import { EmptyState, SectionHeader } from "@/components/ui-blocks";
 import { plural } from "@/lib/text";
+import { CommitteePicker } from "@/components/admin/committee-picker";
 import { ExportLinks } from "@/components/admin/export-links";
 
 export default async function AdminMembersPage({
   searchParams,
 }: {
-  searchParams: Promise<{ q?: string; type?: string; committee?: string }>;
+  searchParams: Promise<{ q?: string; type?: string; committee?: string; status?: string }>;
 }) {
   const params = await searchParams;
   const [members, committees] = await Promise.all([
     listMembers({
       query: params.q,
       memberType: params.type === "NEW" || params.type === "ACTIVE" ? params.type : "all",
+      status:
+        params.status === "ACTIVE" ||
+        params.status === "ON_LEAVE" ||
+        params.status === "HONORARY" ||
+        params.status === "INACTIVE"
+          ? params.status
+          : "all",
       committeeId: params.committee ?? "all",
     }),
     listCommittees(),
   ]);
-  const filtered = Boolean(params.q || params.type || params.committee);
+  const filtered = Boolean(params.q || params.type || params.committee || params.status);
 
   return (
     <div className="space-y-6">
@@ -48,6 +56,21 @@ export default async function AdminMembersPage({
           <NativeSelect id="type" name="type" defaultValue={params.type ?? "all"} className="w-40">
             <option value="all">Todos</option>
             {optionsOf(MEMBER_TYPE).map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </NativeSelect>
+        </Field>
+        <Field label="Estado" htmlFor="status">
+          <NativeSelect
+            id="status"
+            name="status"
+            defaultValue={params.status ?? "all"}
+            className="w-40"
+          >
+            <option value="all">Todos</option>
+            {optionsOf(MEMBER_STATUS).map((option) => (
               <option key={option.value} value={option.value}>
                 {option.label}
               </option>
@@ -111,21 +134,7 @@ export default async function AdminMembersPage({
               ))}
             </NativeSelect>
           </Field>
-          <fieldset className="space-y-2 md:col-span-2">
-            <legend className="mb-1 text-sm font-medium">Comités</legend>
-            <div className="flex flex-wrap gap-2">
-              {committees.map((committee) => (
-                <CheckChip
-                  key={committee.id}
-                  name="committeeIds"
-                  value={committee.id}
-                  color={committee.color}
-                >
-                  {committee.name}
-                </CheckChip>
-              ))}
-            </div>
-          </fieldset>
+          <CommitteePicker committees={committees} />
           <div className="md:col-span-2">
             <SubmitButton pendingLabel="Creando…">Crear</SubmitButton>
           </div>

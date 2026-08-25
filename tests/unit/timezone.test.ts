@@ -6,6 +6,7 @@ process.env.APP_TIMEZONE = "America/Bogota";
 
 import { describe, expect, it } from "vitest";
 import { rangeForIsoWeek, startOfMonthUtc, startOfWeekUtc, isoWeekId } from "@/lib/dates";
+import { isPast } from "@/server/db/time";
 
 // 2026-03-08 is the US DST switch; Bogotá (UTC-5) never shifts.
 const tuesdayAfterDstSwitch = new Date("2026-03-10T12:00:00.000Z");
@@ -38,5 +39,15 @@ describe("date windows under a DST host timezone", () => {
     const range = rangeForIsoWeek("2026-W45");
     const days = (range!.end.getTime() - range!.start.getTime()) / 86_400_000;
     expect(days).toBe(7);
+  });
+});
+
+describe("isPast", () => {
+  it("does not treat an offset timestamptz as expired against the same instant in Z", () => {
+    const at = new Date("2026-08-25T15:20:00.000Z");
+    // 10:30-05 is 15:30Z — still in the future — but sorts as earlier than 15:20Z as text.
+    expect("2026-08-25T10:30:00.000-05:00" < at.toISOString()).toBe(true);
+    expect(isPast("2026-08-25T10:30:00.000-05:00", at)).toBe(false);
+    expect(isPast("2026-08-25T10:10:00.000-05:00", at)).toBe(true);
   });
 });

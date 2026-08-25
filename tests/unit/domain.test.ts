@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   creditForMember,
+  committeeCreditShare,
+  formatCredit,
   membershipActiveAt,
   participationRate,
   averageRate,
@@ -27,6 +29,12 @@ import {
   requireCommitteeViewer,
   type Actor,
 } from "@/server/domain/authorization";
+import {
+  assertCommitteeSelection,
+  canAuthenticate,
+  participatesInCompetition,
+  splitMemberships,
+} from "@/server/domain/members-pure";
 import { parseTabular } from "@/server/domain/import";
 
 describe("CommitteeScoringService (pure)", () => {
@@ -37,6 +45,22 @@ describe("CommitteeScoringService (pure)", () => {
   it("FRACTIONAL_CREDIT splits participation evenly", () => {
     expect(creditForMember("FRACTIONAL_CREDIT", 2)).toBeCloseTo(0.5);
     expect(creditForMember("FRACTIONAL_CREDIT", 3)).toBeCloseTo(1 / 3);
+  });
+
+  it("never splits individual GH Points: 1, 2 or 3 committees only change committee credit", () => {
+    expect(committeeCreditShare("FULL_CREDIT", 1)).toEqual({
+      committeeCount: 1,
+      creditPerCommittee: 1,
+      totalCredit: 1,
+    });
+    expect(committeeCreditShare("FULL_CREDIT", 2).totalCredit).toBe(2);
+    expect(committeeCreditShare("FULL_CREDIT", 3).creditPerCommittee).toBe(1);
+    expect(committeeCreditShare("FRACTIONAL_CREDIT", 1).creditPerCommittee).toBe(1);
+    expect(committeeCreditShare("FRACTIONAL_CREDIT", 2).creditPerCommittee).toBeCloseTo(0.5);
+    expect(committeeCreditShare("FRACTIONAL_CREDIT", 3).totalCredit).toBeCloseTo(1);
+    expect(formatCredit(1)).toBe("1");
+    expect(formatCredit(0.5)).toBe("0,5");
+    expect(formatCredit(1 / 3)).toBe("⅓");
   });
 
   it("uses relative participation, not raw headcount", () => {
@@ -139,6 +163,45 @@ describe("admin FormData enum parse", () => {
   it("accepts a listed value and rejects unknown ones", () => {
     expect(parseEnum("NEW", ["NEW", "ACTIVE"])).toBe("NEW");
     expect(() => parseEnum(" intern ", ["NEW", "ACTIVE"])).toThrow(DomainError);
+  });
+});
+
+describe("member life status and committees", () => {
+  it("lets vigente and honorario sign in; licencia and retirado cannot", () => {
+    expect(canAuthenticate("ACTIVE")).toBe(true);
+    expect(canAuthenticate("HONORARY")).toBe(true);
+    expect(canAuthenticate("ON_LEAVE")).toBe(false);
+    expect(canAuthenticate("INACTIVE")).toBe(false);
+  });
+
+  it("only vigente compete on rankings and count as committee eligible", () => {
+    expect(participatesInCompetition("ACTIVE")).toBe(true);
+    expect(participatesInCompetition("HONORARY")).toBe(false);
+    expect(participatesInCompetition("ON_LEAVE")).toBe(false);
+    expect(participatesInCompetition("INACTIVE")).toBe(false);
+  });
+
+  it("caps current committees at 3 and requires at least one for vigente", () => {
+    expect(assertCommitteeSelection(["a", "b"], true)).toEqual(["a", "b"]);
+    expect(() => assertCommitteeSelection(["a", "b", "c", "d"], false)).toThrow(DomainError);
+    expect(() => assertCommitteeSelection([], true)).toThrow(DomainError);
+    expect(assertCommitteeSelection([], false)).toEqual([]);
+  });
+
+  it("splits current memberships from Perteneció a", () => {
+    const gemis = {
+      isActive: true,
+      joinedAt: new Date("2026-07-01"),
+      leftAt: null,
+    };
+    const pixel = {
+      isActive: false,
+      joinedAt: new Date("2026-01-15"),
+      leftAt: new Date("2026-06-15"),
+    };
+    const { current, past } = splitMemberships([gemis, pixel]);
+    expect(current).toEqual([gemis]);
+    expect(past).toEqual([pixel]);
   });
 });
 

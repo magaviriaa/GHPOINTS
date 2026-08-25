@@ -1,8 +1,8 @@
 /**
- * Los enums de Prisma son cómo está construido el sistema; esto es cómo lo
- * nombra la persona que lo usa. Fuente única: badges de estado, `<option>` de
- * administración y exportaciones leen de aquí, para que un mismo estado se
- * llame igual en toda la app.
+ * Los enums del contrato de datos son cómo está construido el sistema; esto es
+ * cómo lo nombra la persona que lo usa. Fuente única: badges de estado,
+ * `<option>` de administración y exportaciones leen de aquí, para que un mismo
+ * estado se llame igual en toda la app.
  */
 
 export type Tone = "neutral" | "info" | "success" | "warning" | "danger" | "muted";
@@ -39,8 +39,26 @@ export const MEMBER_TYPE = entries({
  * misma fila no distinguen nada.
  */
 export const MEMBER_STATUS = entries({
-  ACTIVE: { label: "Vigente", tone: "success" },
-  INACTIVE: { label: "Retirado", tone: "muted" },
+  ACTIVE: {
+    label: "Vigente",
+    tone: "success",
+    hint: "Compite, asiste y cuenta en el tamaño de su comité",
+  },
+  ON_LEAVE: {
+    label: "En licencia",
+    tone: "warning",
+    hint: "Pausa del semestre: no entra ni cuenta en el denominador del comité",
+  },
+  HONORARY: {
+    label: "Honorario",
+    tone: "info",
+    hint: "Puede entrar; no compite en el ranking ni infla el comité",
+  },
+  INACTIVE: {
+    label: "Retirado",
+    tone: "muted",
+    hint: "Salió de la organización; el historial de puntos se conserva",
+  },
 });
 
 export const SEASON_STATUS = entries({
@@ -85,12 +103,12 @@ export const CREDIT_STRATEGY = entries({
   FULL_CREDIT: {
     label: "Crédito completo",
     tone: "neutral",
-    hint: "Quien está en varios comités suma en todos. Replica el flujo de Forms.",
+    hint: "1 comité → 1,0; 2 → 1,0 cada uno; 3 → 1,0 cada uno. Los GH Points de la persona no se parten.",
   },
   FRACTIONAL_CREDIT: {
     label: "Crédito repartido",
     tone: "neutral",
-    hint: "La asistencia se divide entre los comités de la persona.",
+    hint: "1 comité → 1,0; 2 → 0,5 cada uno; 3 → ⅓ cada uno. Los GH Points de la persona no se parten.",
   },
 });
 
