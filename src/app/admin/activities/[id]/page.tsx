@@ -14,26 +14,27 @@ import { toLocalInput, formatDateTime } from "@/lib/dates";
 import { plural } from "@/lib/text";
 import {
   adminAddAttendanceAction,
-  adminApproveAttendanceAction,
   adminBulkApproveAction,
   adminBulkRejectAction,
-  adminCancelAttendanceAction,
   adminDisableAttendanceTokenAction,
-  adminRejectAttendanceAction,
   adminRotateQrAction,
   adminUpdateActivityAction,
 } from "@/server/actions/admin";
 import { ClientForm, SubmitButton } from "@/components/forms/client-form";
 import { ConfirmButton } from "@/components/forms/confirm-button";
-import { Field, NativeSelect } from "@/components/ui/field";
+import { Field, NativeSelect, Textarea } from "@/components/ui/field";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { DataTable } from "@/components/ui/data-table";
 import { DynamicQrControls } from "@/components/admin/dynamic-qr-controls";
 import { ACTIVITY_STATUS, APPROVAL_MODE, ATTENDANCE_STATUS, optionsOf } from "@/lib/labels";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { EmptyState, SectionHeader } from "@/components/ui-blocks";
 import { ExportLinks } from "@/components/admin/export-links";
+import { ActivityLifecycleControls } from "@/components/admin/activity-lifecycle-controls";
+import {
+  AttendanceSelection,
+  type AttendanceSelectionRow,
+} from "@/components/admin/attendance-selection";
 
 export default async function AdminActivityDetailPage({
   params,
@@ -67,6 +68,21 @@ export default async function AdminActivityDetailPage({
   const url = `${getEnv().APP_URL}/a/${activity.publicId}`;
   const qr = await QRCode.toDataURL(url, { margin: 1, width: 280 });
   const pendingIds = attendances.filter((row) => row.status === "PENDING").map((row) => row.id);
+  const readOnly = activity.status === "PROCESSED" || activity.status === "CANCELLED";
+  const datesFrozen = activity.status === "CLOSED" || readOnly;
+  const published = activity.status !== "DRAFT";
+  const canDecide = activity.status === "OPEN" || activity.status === "CLOSED";
+  const selectionRows: AttendanceSelectionRow[] = attendances.map((row) => ({
+    id: row.id,
+    registeredAt: row.registeredAt,
+    source: row.source,
+    status: row.status,
+    member: {
+      fullName: row.member.fullName,
+      institutionalEmail: row.member.institutionalEmail,
+      committees: row.member.committees.map((item) => item.committee.name),
+    },
+  }));
 
   return (
     <div className="space-y-8">
@@ -91,6 +107,13 @@ export default async function AdminActivityDetailPage({
         />
       </div>
 
+      <ActivityLifecycleControls
+        activityId={activity.id}
+        status={activity.status}
+        needsApproval={activity.needsApproval}
+        cancelReason={activity.cancelReason}
+      />
+
       <div className="grid gap-6 md:grid-cols-[288px_1fr]">
         <div className="rounded-xl border bg-card p-4">
           {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -98,12 +121,14 @@ export default async function AdminActivityDetailPage({
           <p className="font-mono mt-3 text-center text-xs break-all text-muted-foreground">
             {url}
           </p>
-          <ClientForm action={adminRotateQrAction} className="mt-3" successMessage="QR regenerado.">
-            <input type="hidden" name="activityId" value={activity.id} />
-            <SubmitButton variant="secondary" className="w-full" pendingLabel="Regenerando…">
-              Regenerar QR público
-            </SubmitButton>
-          </ClientForm>
+          {!readOnly ? (
+            <ClientForm action={adminRotateQrAction} className="mt-3" successMessage="QR regenerado.">
+              <input type="hidden" name="activityId" value={activity.id} />
+              <SubmitButton variant="secondary" className="w-full" pendingLabel="Regenerando…">
+                Regenerar QR público
+              </SubmitButton>
+            </ClientForm>
+          ) : null}
           {activity.publicIdHistory.length > 0 ? (
             <p className="mt-3 text-xs text-muted-foreground">
               Códigos anteriores, ya inválidos:{" "}
@@ -112,7 +137,7 @@ export default async function AdminActivityDetailPage({
               </span>
             </p>
           ) : null}
-          <div className="mt-4 border-t pt-4">
+          {!readOnly ? <div className="mt-4 border-t pt-4">
             <DynamicQrControls
               activityId={activity.id}
               enabled={activity.requireAttendanceToken}
@@ -130,7 +155,7 @@ export default async function AdminActivityDetailPage({
                 </SubmitButton>
               </ClientForm>
             ) : null}
-          </div>
+          </div> : null}
         </div>
 
         <div className="rounded-xl border bg-card p-4">
@@ -142,7 +167,15 @@ export default async function AdminActivityDetailPage({
           >
             <input type="hidden" name="activityId" value={activity.id} />
             <Field label="Nombre" htmlFor="name" span>
-              <Input id="name" name="name" defaultValue={activity.name} />
+              <Input id="name" name="name" defaultValue={activity.name} readOnly={readOnly} />
+            </Field>
+            <Field label="Descripción" htmlFor="description" span>
+              <Textarea
+                id="description"
+                name="description"
+                defaultValue={activity.description ?? ""}
+                readOnly={readOnly}
+              />
             </Field>
             <Field label="Inicio" htmlFor="startsAt">
               <Input
@@ -150,6 +183,7 @@ export default async function AdminActivityDetailPage({
                 name="startsAt"
                 type="datetime-local"
                 defaultValue={toLocalInput(activity.startsAt)}
+                readOnly={datesFrozen}
               />
             </Field>
             <Field label="Puntos" htmlFor="individualPoints">
@@ -158,6 +192,7 @@ export default async function AdminActivityDetailPage({
                 name="individualPoints"
                 type="number"
                 defaultValue={activity.individualPoints}
+                readOnly={published}
               />
             </Field>
             <Field label="Registro desde" htmlFor="registrationStart">
@@ -166,6 +201,7 @@ export default async function AdminActivityDetailPage({
                 name="registrationStart"
                 type="datetime-local"
                 defaultValue={toLocalInput(activity.registrationStart)}
+                readOnly={datesFrozen}
               />
             </Field>
             <Field label="Registro hasta" htmlFor="registrationEnd">
@@ -174,6 +210,7 @@ export default async function AdminActivityDetailPage({
                 name="registrationEnd"
                 type="datetime-local"
                 defaultValue={toLocalInput(activity.registrationEnd)}
+                readOnly={datesFrozen}
               />
             </Field>
             <Field label="Aprobación" htmlFor="approvalMode">
@@ -181,6 +218,7 @@ export default async function AdminActivityDetailPage({
                 id="approvalMode"
                 name="approvalMode"
                 defaultValue={activity.approvalMode}
+                disabled={published}
               >
                 {optionsOf(APPROVAL_MODE).map((option) => (
                   <option key={option.value} value={option.value}>
@@ -188,23 +226,13 @@ export default async function AdminActivityDetailPage({
                   </option>
                 ))}
               </NativeSelect>
+              {published ? (
+                <input type="hidden" name="approvalMode" value={activity.approvalMode} />
+              ) : null}
             </Field>
-            <Field
-              label="Estado"
-              htmlFor="status"
-              hint="Cerrar congela el denominador del score de comité."
-            >
-              <NativeSelect id="status" name="status" defaultValue={activity.status}>
-                {optionsOf(ACTIVITY_STATUS).map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </NativeSelect>
-            </Field>
-            <div className="md:col-span-2">
+            {!readOnly ? <div className="md:col-span-2">
               <SubmitButton pendingLabel="Guardando…">Guardar</SubmitButton>
-            </div>
+            </div> : null}
           </ClientForm>
         </div>
       </div>
@@ -290,24 +318,21 @@ export default async function AdminActivityDetailPage({
           </Button>
         </form>
 
-        {pendingIds.length > 0 ? (
+        {pendingIds.length > 0 && canDecide ? (
           <div className="flex flex-wrap items-center gap-2 rounded-xl border border-accent/40 bg-accent/10 px-4 py-3">
             <p className="tnum mr-auto text-sm">
               {plural(pendingIds.length, "registro")} pendientes de decisión.
             </p>
-            <ClientForm action={adminBulkApproveAction} successMessage="Aprobados.">
-              {pendingIds.map((attendanceId) => (
-                <input
-                  key={attendanceId}
-                  type="hidden"
-                  name="attendanceIds"
-                  value={attendanceId}
-                />
-              ))}
-              <SubmitButton size="sm" pendingLabel="Aprobando…">
-                Aprobar todos los pendientes ({pendingIds.length})
-              </SubmitButton>
-            </ClientForm>
+            <ConfirmButton
+              size="sm"
+              action={adminBulkApproveAction}
+              formData={{ attendanceIds: pendingIds }}
+              label={`Aprobar todos (${pendingIds.length})`}
+              title="Aprobar todos los pendientes visibles"
+              description={`Se acreditarán los GH Points de ${plural(pendingIds.length, "registro")}. El lote se aplicará completo o no se aplicará.`}
+              confirmLabel="Aprobar todos"
+              confirmVariant="default"
+            />
             <ConfirmButton
               size="sm"
               action={adminBulkRejectAction}
@@ -326,73 +351,10 @@ export default async function AdminActivityDetailPage({
         {attendances.length === 0 ? (
           <EmptyState title="Ningún registro con esos filtros." />
         ) : (
-          <DataTable
-            caption="Asistentes de la actividad"
-            rows={attendances}
-            rowKey={(row) => row.id}
-            columns={[
-              {
-                key: "member",
-                header: "Integrante",
-                primary: true,
-                cell: (row) => <span className="font-medium">{row.member.fullName}</span>,
-              },
-              {
-                key: "committees",
-                header: "Comités",
-                cell: (row) =>
-                  row.member.committees.length === 0 ? (
-                    <span className="text-muted-foreground">—</span>
-                  ) : (
-                    row.member.committees.map((item) => item.committee.name).join(", ")
-                  ),
-              },
-              {
-                key: "status",
-                header: "Estado",
-                cell: (row) => (
-                  <StatusBadge dictionary={ATTENDANCE_STATUS} value={row.status} />
-                ),
-              },
-              {
-                key: "actions",
-                header: "Acciones",
-                actions: true,
-                cell: (row) => (
-                  <div className="flex flex-wrap justify-end gap-2 md:justify-start">
-                    {row.status !== "APPROVED" ? (
-                      <ClientForm action={adminApproveAttendanceAction} successMessage="Aprobada.">
-                        <input type="hidden" name="attendanceId" value={row.id} />
-                        <SubmitButton size="sm" pendingLabel="…">
-                          Aprobar
-                        </SubmitButton>
-                      </ClientForm>
-                    ) : null}
-                    {row.status === "PENDING" ? (
-                      <ClientForm action={adminRejectAttendanceAction} successMessage="Rechazada.">
-                        <input type="hidden" name="attendanceId" value={row.id} />
-                        <SubmitButton size="sm" variant="secondary" pendingLabel="…">
-                          Rechazar
-                        </SubmitButton>
-                      </ClientForm>
-                    ) : null}
-                    {row.status !== "CANCELLED" ? (
-                      <ClientForm action={adminCancelAttendanceAction} successMessage="Anulada.">
-                        <input type="hidden" name="attendanceId" value={row.id} />
-                        <input type="hidden" name="reason" value="Anulación administrativa" />
-                        <SubmitButton size="sm" variant="destructive" pendingLabel="…">
-                          Anular
-                        </SubmitButton>
-                      </ClientForm>
-                    ) : null}
-                  </div>
-                ),
-              },
-            ]}
-          />
+          <AttendanceSelection rows={selectionRows} activityStatus={activity.status} />
         )}
 
-        <div className="rounded-xl border bg-card p-4">
+        {canDecide ? <div className="rounded-xl border bg-card p-4">
           <h2 className="font-display font-bold">Registrar a alguien a mano</h2>
           <p className="mt-1 text-sm text-muted-foreground">
             Para quien asistió pero no alcanzó a escanear. Queda con origen «registro manual».
@@ -414,7 +376,7 @@ export default async function AdminActivityDetailPage({
             </Field>
             <SubmitButton pendingLabel="Agregando…">Agregar asistencia</SubmitButton>
           </ClientForm>
-        </div>
+        </div> : null}
       </section>
     </div>
   );

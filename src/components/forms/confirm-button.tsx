@@ -31,6 +31,8 @@ export function ConfirmButton({
   confirmLabel,
   variant = "secondary",
   size,
+  disabled = false,
+  confirmVariant = "destructive",
 }: {
   action: (formData: FormData) => Promise<Result>;
   formData: Record<string, string | string[]>;
@@ -40,6 +42,8 @@ export function ConfirmButton({
   confirmLabel: string;
   variant?: React.ComponentProps<typeof Button>["variant"];
   size?: React.ComponentProps<typeof Button>["size"];
+  disabled?: boolean;
+  confirmVariant?: React.ComponentProps<typeof Button>["variant"];
 }) {
   const [open, setOpen] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -68,7 +72,7 @@ export function ConfirmButton({
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button type="button" variant={variant} size={size}>
+        <Button type="button" variant={variant} size={size} disabled={disabled}>
           {label}
         </Button>
       </DialogTrigger>
@@ -84,7 +88,7 @@ export function ConfirmButton({
               Volver
             </Button>
           </DialogClose>
-          <Button type="button" variant="destructive" disabled={pending} onClick={run}>
+          <Button type="button" variant={confirmVariant} disabled={pending} onClick={run}>
             {pending ? "Aplicando…" : confirmLabel}
           </Button>
         </DialogFooter>

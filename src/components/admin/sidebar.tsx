@@ -21,7 +21,7 @@ import {
 import { logoutAction } from "@/server/actions/auth";
 import type { Actor } from "@/server/domain/authorization";
 import { ThemeToggle } from "@/components/theme-toggle";
-import { Wordmark } from "@/components/brand/wordmark";
+import { PodiumMark, Wordmark } from "@/components/brand/wordmark";
 import { cn } from "@/lib/utils";
 import type { ThemePreference } from "@/server/theme/preference";
 
@@ -116,7 +116,10 @@ export function AdminSidebar({ actor, theme }: { actor: Actor; theme: ThemePrefe
       */}
       <details className="bg-tinta text-white md:hidden">
         <summary className="flex h-14 cursor-pointer list-none items-center gap-3 px-4 [&::-webkit-details-marker]:hidden">
-          <Wordmark href="/admin" className="text-white" />
+          <span className="font-display inline-flex items-center gap-2 text-lg font-extrabold tracking-tight text-white">
+            <PodiumMark />
+            GH Points
+          </span>
           <span className="ml-auto rounded-md bg-white/12 px-3 py-1.5 text-sm font-medium">
             {current?.label ?? "Menú"}
           </span>
