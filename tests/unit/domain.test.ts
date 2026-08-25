@@ -17,15 +17,24 @@ import {
   earnsTopBadge,
   monthlyMvpMemberIds,
 } from "@/server/domain/badges-pure";
-import { isEntraTidAllowed, entraEmailFromClaims } from "@/server/auth/entra-pure";
+import {
+  entraAllowedIssuers,
+  isEntraTidAllowed,
+  entraEmailFromClaims,
+} from "@/server/auth/entra-pure";
 import { parseIsoWeekId, rangeForIsoWeek } from "@/lib/dates";
 import { assertAttendanceTransition } from "@/server/domain/attendance-credit";
 import { DomainError, ErrorCodes, isDomainError } from "@/server/domain/errors";
-import { isAllowedEmailDomain, normalizeEmail } from "@/server/auth/email";
+import {
+  isAllowedEmailDomain,
+  isValidEmailAddress,
+  normalizeEmail,
+} from "@/server/auth/email";
 import { parseEnum } from "@/server/actions/form-parse";
 import {
   canViewCommitteeRoster,
   ledCommitteeIds,
+  requireActor,
   requireCommitteeViewer,
   type Actor,
 } from "@/server/domain/authorization";
@@ -36,6 +45,7 @@ import {
   splitMemberships,
 } from "@/server/domain/members-pure";
 import { parseTabular } from "@/server/domain/import";
+import { assertActivityTransition } from "@/server/domain/activities";
 
 describe("CommitteeScoringService (pure)", () => {
   it("FULL_CREDIT counts 1 per committee even if the member is in several", () => {
@@ -148,6 +158,31 @@ describe("Asistencia credit transitions", () => {
   });
 });
 
+describe("Activity lifecycle", () => {
+  it.each([
+    ["DRAFT", "OPEN"],
+    ["OPEN", "CLOSED"],
+    ["CLOSED", "PROCESSED"],
+    ["DRAFT", "CANCELLED"],
+    ["OPEN", "CANCELLED"],
+    ["CLOSED", "CANCELLED"],
+    ["PROCESSED", "CANCELLED"],
+  ] as const)("allows %s → %s", (from, to) => {
+    expect(() => assertActivityTransition(from, to)).not.toThrow();
+  });
+
+  it.each([
+    ["OPEN", "DRAFT"],
+    ["CLOSED", "OPEN"],
+    ["PROCESSED", "CLOSED"],
+    ["DRAFT", "PROCESSED"],
+    ["CANCELLED", "OPEN"],
+    ["CANCELLED", "CANCELLED"],
+  ] as const)("rejects %s → %s", (from, to) => {
+    expect(() => assertActivityTransition(from, to)).toThrow(DomainError);
+  });
+});
+
 describe("email whitelist", () => {
   it("normalizes case and whitespace", () => {
     expect(normalizeEmail("  Ana@Universidad.EDU.CO ")).toBe("ana@universidad.edu.co");
@@ -156,6 +191,13 @@ describe("email whitelist", () => {
   it("rejects non-institutional domains", () => {
     expect(isAllowedEmailDomain("ana@gmail.com", ["eafit.edu.co"])).toBe(false);
     expect(isAllowedEmailDomain("ana@eafit.edu.co", ["eafit.edu.co"])).toBe(true);
+  });
+
+  it("rejects empty local parts, repeated separators and whitespace", () => {
+    expect(isValidEmailAddress("ana@eafit.edu.co")).toBe(true);
+    expect(isValidEmailAddress("@eafit.edu.co")).toBe(false);
+    expect(isValidEmailAddress("ana@@eafit.edu.co")).toBe(false);
+    expect(isValidEmailAddress("ana smith@eafit.edu.co")).toBe(false);
   });
 });
 
@@ -233,6 +275,21 @@ describe("COMMITTEE_LEADER authorization", () => {
     const leader = leaderActor([{ role: "COMMITTEE_LEADER", committeeId: "gemis" }]);
     expect(canViewCommitteeRoster(admin, "pixel")).toBe(true);
     expect(() => requireCommitteeViewer(leader, "pixel")).toThrow(DomainError);
+  });
+});
+
+describe("authenticated member authorization", () => {
+  it("allows honorary members into the app while rejecting leave and inactive statuses", () => {
+    const honorary = {
+      ...leaderActor([{ role: "MEMBER", committeeId: null }]),
+      status: "HONORARY" as const,
+    };
+    const onLeave = { ...honorary, status: "ON_LEAVE" as const };
+    const inactive = { ...honorary, status: "INACTIVE" as const };
+
+    expect(requireActor(honorary)).toBe(honorary);
+    expect(() => requireActor(onLeave)).toThrow(DomainError);
+    expect(() => requireActor(inactive)).toThrow(DomainError);
   });
 });
 
@@ -323,6 +380,17 @@ describe("Entra tenant allowlist", () => {
       "ana@eafit.edu.co"
     );
   });
+
+  it("derives exact v2 issuers from the trusted tenant ids", () => {
+    expect(entraAllowedIssuers("organizations", ["AAA", "bbb"])).toEqual([
+      "https://login.microsoftonline.com/aaa/v2.0",
+      "https://login.microsoftonline.com/bbb/v2.0",
+    ]);
+    expect(entraAllowedIssuers("tenant-a", [])).toEqual([
+      "https://login.microsoftonline.com/tenant-a/v2.0",
+    ]);
+    expect(entraAllowedIssuers("common", [])).toEqual([]);
+  });
 });
 
 describe("ISO week windows", () => {
@@ -332,5 +400,9 @@ describe("ISO week windows", () => {
     expect(range).not.toBeNull();
     if (!range) return;
     expect(range.end.getTime() - range.start.getTime()).toBe(7 * 24 * 60 * 60 * 1000);
+  });
+
+  it("rejects week 53 in a year that only has 52 ISO weeks", () => {
+    expect(rangeForIsoWeek("2021-W53")).toBeNull();
   });
 });

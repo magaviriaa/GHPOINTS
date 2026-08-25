@@ -69,11 +69,11 @@ Orquesta registro, aprobación y listados. El trabajo derivado (Score de comité
 | Función | Quién | Notas |
 | --- | --- | --- |
 | `registerAttendance` | Actor autenticado | Resuelve actividad por `id` o `publicId`. Rechaza temporada CLOSED, actividad CANCELLED o no OPEN. `assertAttendanceToken` si QR dinámico. Ventana de registro **sin** bypass. Unique → `ALREADY_REGISTERED`. AUTO vs MANUAL. |
-| `adminRegisterAttendance` | ADMIN | Puede registrar fuera de ventana. Source default ADMIN. |
+| `adminRegisterAttendance` | ADMIN | Puede registrar fuera de ventana, únicamente en OPEN/CLOSED. Source default ADMIN. |
 | `upsertApprovedAttendance` | interno (bulk award) | Upsert APPROVED + crédito. Respeta transiciones. |
-| `decideAttendance` | ADMIN | **Única** decisión: `to` ∈ APPROVED/REJECTED/CANCELLED, 1 o N ids. Valida todas las transiciones antes de la transacción, audita cada fila, y notifica en cada aprobación (ADR-023). `reason` obligatorio para CANCELLED. |
+| `decideAttendance` | ADMIN | **Única** decisión: `to` ∈ APPROVED/REJECTED/CANCELLED, 1 o N ids. Bloquea temporadas y actividades en orden estable, relee cada fila, aplica el lote completo o ninguno, audita cada entidad y notifica tras commit. Aprobar/rechazar solo en OPEN/CLOSED; en PROCESSED únicamente corrige APPROVED mediante CANCELLED. `reason` obligatorio para CANCELLED. |
 | `listActivityAttendances` | lectura | Filtro nombre, status, comité activo. |
-| `listPendingAttendances` | cola admin | |
+| `listPendingAttendances` | cola admin | Filtros URL por nombre/correo (`q`), comité y actividad; el correo solo se devuelve a superficies admin. |
 | `isRegistrationOpen` | puro de fechas+status | |
 | `getPublicActivityRegistration` | página `/a/...` | Token inválido → `registrationOpen=false`, `tokenOk=false`. |
 | `countApprovedAttendances` | detalle de actividad | |
@@ -109,9 +109,11 @@ Los fallos se registran y nunca revierten el dominio: la Asistencia y el Ledger 
 | `listPublishedActivities` | integrantes | Status `OPEN`, `CLOSED`, `PROCESSED`, `CANCELLED` (no DRAFT). |
 | `getActivityByPublicId` | registro público | Solo id vigente. |
 | `getActivityById` / `getPublishedActivityById` | admin / app | Published filtra DRAFT. |
-| `createActivity` | ADMIN | Status default OPEN, `needsApproval=false`. |
+| `createActivity` | ADMIN | Status inicial DRAFT u OPEN, `needsApproval=false`. |
 | `proposeActivity` | líder del comité | Status DRAFT, `needsApproval=true`, comité obligatorio y ACTIVE. |
-| `updateActivity` | ADMIN | Recalcula scores. |
+| `updateActivity` | ADMIN | No recibe status. Aplica la matriz de campos editables y usa bloqueo/revalidación para no pisar una edición concurrente. |
+| `transitionActivity` | ADMIN | Único comando de avance: DRAFT→OPEN, OPEN→CLOSED, CLOSED→PROCESSED. Procesar exige cero PENDING. |
+| `cancelActivity` | ADMIN | Motivo obligatorio; cancelación idempotente de actividad y asistencias PENDING/APPROVED, reversión única de cada crédito y auditoría por entidad en una transacción. |
 | `publishProposedActivity` | ADMIN | DRAFT+needsApproval → OPEN, `needsApproval=false`. Dispara Teams `ACTIVITY_OPENED` desde el action. |
 | `rejectProposedActivity` | ADMIN | → CANCELLED. |
 | `rotateActivityPublicId` | ADMIN | Historial + nanoid nuevo. Invalida QR impresos. |
@@ -121,7 +123,19 @@ Los fallos se registran y nunca revierten el dominio: la Asistencia y el Ledger 
 | `getNextOpenActivity` / `getOpenActivities` | home | Próxima con `startsAt >= now`. |
 | `listLeaderProposedActivities` | líder | Si no es admin, solo las que creó él. |
 
-`insertActivity` exige temporada writable (no CLOSED) vía `resolveSeason` + `assertSeasonWritable`.
+La máquina de estados no permite reaperturas ni transiciones inversas:
+
+| Desde | Hacia |
+| --- | --- |
+| DRAFT | OPEN o CANCELLED |
+| OPEN | CLOSED o CANCELLED |
+| CLOSED | PROCESSED o CANCELLED |
+| PROCESSED | CANCELLED |
+| CANCELLED | ninguna; repetir cancelación es no-op |
+
+Campos editables: DRAFT permite todos; OPEN permite nombre, descripción y fechas/ventana, pero congela puntos y aprobación; CLOSED permite solo nombre y descripción; PROCESSED/CANCELLED son de solo lectura.
+
+Todas las mutaciones de actividad —crear, editar, transicionar/cancelar, publicar/rechazar propuesta, rotar publicId o token— exigen temporada writable (no CLOSED), salvo el reintento de una cancelación ya confirmada. Se bloquea primero la temporada y luego la actividad. `individualPoints` queda fijo al publicar, antes de que pueda existir una asistencia, porque el ledger materializa ese valor.
 
 `attendanceMode` siempre `OPEN_LINK` (default del contrato); no hay UI ni rama para otro modo.
 
@@ -131,7 +145,7 @@ Los fallos se registran y nunca revierten el dominio: la Asistencia y el Ledger 
 
 - `getActiveSeason` / `resolveSeason` / `listSeasons`.
 - `createSeason`: ADMIN; unique parcial → `CONFLICT` si ya hay ACTIVE.
-- `updateSeasonStatus`: si el destino es `CLOSED`, **en la misma transacción** construye y persiste Hall of Fame (ADR-018), luego `refreshBadges`.
+- `updateSeasonStatus`: bloquea la temporada; si el destino es `CLOSED`, **en la misma transacción y snapshot** construye y persiste Hall of Fame, cambia el estado y audita (ADR-018). Luego del commit refresca badges.
 - `assertSeasonWritable`: CLOSED no admite nuevas actividades.
 
 Cerrar no borra ledger ni asistencias.
@@ -272,7 +286,7 @@ El «comité» que el home muestra primero es el primero del array de membresía
 ## Puntos admin — `admin-points.ts`
 
 - `assignManualPoints`: temporada writable; tipo inferido PENALTY si puntos &lt; 0, si no MANUAL_ADJUSTMENT (salvo override). Audit `POINTS_ASSIGNED` + badges.
-- `reversePoints`: `POINTS_REVERSED`.
+- `reversePoints`: solo movimientos manuales/bonus/penalizaciones vivos y temporada abierta; rechaza `ACTIVITY`, `REVERSAL` y una segunda reversión. Audit `POINTS_REVERSED` + badges.
 - `bulkAwardActivity`: `upsertApprovedAttendance` por cada id (source ADMIN), luego scores. Audit `POINTS_BULK_ASSIGNED`.
 - `listPointTransactions`: ledger reciente para la UI.
 
@@ -284,17 +298,15 @@ Dos flujos: integrantes y Forms.
 
 ### Parseo tabular
 
-CSV (PapaParse) o XLSX (primera hoja). Encabezados: alias en español/inglés; **cualquier columna no reconocida o encabezado vacío rechaza el archivo**. Obligatorio integrantes: nombre, correo. Forms: email, actividad.
+CSV (PapaParse) o XLSX (primera hoja), máximo 10 MB y 10.000 filas. Otro formato, error CSV o exceso de filas se rechaza. Encabezados: alias en español/inglés; **cualquier columna no reconocida o encabezado vacío rechaza el archivo**. Obligatorio integrantes: nombre, correo. Forms: email, actividad.
 
 ### Integrantes
 
-Preview valida dominio, duplicados en archivo, comités por slug o nombre slugificado. Tipo desconocido → warning y NEW. `saveMemberImportPreview` guarda job `PREVIEWED`. Commit exige cero errores; upsert por email; **añade** comités, no retira los existentes. Job `COMMITTED` + audit `MEMBERS_IMPORTED`.
+Preview valida dominio, duplicados en archivo, comités por slug o nombre slugificado. Tipo desconocido → warning y NEW. `saveMemberImportPreview` guarda job `PREVIEWED`. Commit exige cero errores; upsert por email; **añade** comités, no retira los existentes. Las filas, el cambio del job a `COMMITTED` y la auditoría ocurren en la misma transacción.
 
 ### Forms / asistencias históricas
 
-Filas: email + `activityKey` (publicId, nombre o id interno) + fecha opcional. Crea asistencia APPROVED source `MICROSOFT_FORMS` + crédito. Duplicado unique → skip. Recalcula scores tocados. API JSON: `formsJsonBodySchema` (`rows[].email`, `activityKey`, `registeredAt` ISO opcional).
-
-`consumeMemberImportPreview` marca cualquier preview (también Forms) como `CONSUMED`.
+Filas: email + `activityKey` (publicId, nombre o id interno) + fecha opcional. El commit administrativo bloquea temporadas/actividades, relee todas las referencias y crea asistencia APPROVED source `MICROSOFT_FORMS` + crédito + auditoría por fila en una transacción; cualquier fila inválida revierte el lote. Duplicado ya existente se omite. Los scores tocados se recalculan tras commit. API JSON: `formsJsonBodySchema` (`rows[].email`, `activityKey`, `registeredAt` ISO opcional).
 
 ---
 
@@ -308,7 +320,9 @@ Ruta: `GET /api/admin/export/[type]?format=&activityId=&seasonId=`.
 
 ## Auditoría — `audit.ts`
 
-`writeAuditLog` / `listAuditLogs` (búsqueda en action, entityType, entityId, nombre del actor). No hay UI de JSON before/after; la página muestra action, actor, entidad, fecha.
+`writeAuditLog(tx, input)` exige el cliente de transacción; no existe un camino de escritura con conexión global. Miembros, comités, temporadas, actividades, asistencias, puntos, configuración e importaciones persisten dato y auditoría bajo el mismo commit. Si insertar la auditoría falla, la mutación se revierte. En lotes se escribe una entrada por entidad modificada.
+
+`listAuditLogs` busca en action, entityType, entityId y nombre del actor. No hay UI de JSON before/after; la página muestra action, actor, entidad y fecha.
 
 Acciones escritas desde el dominio incluyen, entre otras: `MEMBER_*`, `COMMITTEE_*`, `SEASON_*`, `ACTIVITY_*`, `ATTENDANCE_*`, `POINTS_*`, `MEMBERS_IMPORTED`.
 

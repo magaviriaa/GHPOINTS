@@ -15,14 +15,13 @@ cp .env.example .env
 # Ajusta DATABASE_URL
 npm install
 npm run db:up          # Postgres 18 en :5432
-npx prisma contract emit
-npx prisma db init --yes
-npm run db:constraints
+npm run contract:emit
+npm run db:deploy      # migraciones + índices parciales + verify
 npm run db:seed
 npm run dev            # http://localhost:3000
 ```
 
-`npm run db:reset` equivale a init + constraints + seed (destructivo). Si la base ya está firmada, `prisma db init --yes` puede pedir consentimiento: `docker compose down -v` y luego el reset.
+`npm run db:reset` equivale a init + constraints + verify + seed y es **destructivo**. `prisma db init` queda reservado para este reset local; nunca se usa para desplegar ni en CI porque podría esconder una cadena de migraciones incompleta. Si la base ya está firmada, `prisma db init --yes` puede pedir consentimiento: `docker compose down -v` y luego el reset.
 
 Postgres Homebrew: en `.env.example` hay un comentario con `postgresql://USER@localhost:5432/ghpoints`. Docker:
 
@@ -94,13 +93,13 @@ Si el volumen local tiene un esquema viejo, `docker compose down -v` y luego `np
 | `typecheck` | `tsc --noEmit` |
 | `db:up` / `db:down` | Compose |
 | `db:generate` / `contract:emit` | `prisma contract emit` |
-| `db:init` | `prisma db init` (base vacía) |
-| `db:migrate` | `prisma db update` (local, aplica el contrato) |
-| `db:deploy` | `prisma db migrate` (producción, tras un plan) |
+| `db:init` | `prisma db init` (solo reset local de una base descartable) |
+| `db:migrate` | `prisma db update` + constraints + `prisma db verify` (iteración local del contrato) |
+| `db:deploy` | `prisma migrate` + constraints + `prisma db verify` (CI/producción) |
 | `db:constraints` | Uniques parciales (`src/prisma/apply-constraints.ts`) |
 | `db:seed` | `tsx --conditions=react-server prisma/seed.ts` |
 | `db:prune` | Borra sesiones vencidas y retos de login de más de 24 h |
-| `db:reset` | `prisma db init --yes` + constraints + seed (destructivo) |
+| `db:reset` | `prisma db init --yes` + constraints + verify + seed (destructivo) |
 | `test` | Vitest **solo** `tests/unit` |
 | `test:watch` | Vitest watch (unit + integration según include) |
 | `test:integration` | Vitest `tests/integration` (necesita `DATABASE_URL` postgres) |
@@ -111,13 +110,13 @@ La condición `react-server` en seed y prune hace que `server-only` resuelva a s
 ## Config de build y calidad
 
 - `next.config.ts`: Prisma y `pg` como paquetes externos del server; Turbopack root = repo; cabeceras de seguridad estáticas (`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Permissions-Policy`, HSTS en producción).
-- `src/proxy.ts` (convención de Next 16; antes `middleware.ts`): redirect por presencia de cookie **y** CSP con nonce por request, en modo enforce (ADR-022).
+- `src/proxy.ts` (convención de Next 16; antes `middleware.ts`): redirect de rutas protegidas cuando falta la cookie, preservando pathname + query, y CSP con nonce por request en modo enforce (ADR-022). La página de login valida las cookies presentes.
 - `tsconfig.json`: paths `@/*` → `src/*`, strict.
 - `vitest.config.ts`: alias `@` y `server-only` → `tests/empty.ts`.
-- `playwright.config.ts`: Chromium, `fullyParallel: false`, `reuseExistingServer: true`.
+- `playwright.config.ts`: Chromium desktop + WebKit móvil (iPhone 13), un worker y servidor nuevo. Reutilizar uno local exige `PLAYWRIGHT_REUSE_SERVER=1`.
 - `.oxlintrc.json`: plugin anti-slop en `tools/oxlint/anti-slop`; ignora `src/components/ui/**`.
 - `components.json`: shadcn.
-- `.github/workflows/ci.yml`: job `static` (lint + typecheck + unit) y job `integration` con Postgres 18, `prisma db init`, constraints y seed. Node 24.
+- `.github/workflows/ci.yml`: job `static` (audit + lint + typecheck + unit + build) y job `integration` con PostgreSQL 18 vacío. El segundo valida el grafo, ejecuta exclusivamente `db:deploy`, seed, integración y E2E Chromium/WebKit. Node 24.
 
 ## Persistencia de configuración de negocio
 
@@ -127,7 +126,7 @@ Además del env, `AppConfig` en Postgres guarda `committee_credit_strategy` (edi
 
 - `NODE_ENV=production`: cookie `Secure`, OTP aleatorio (ignora `OTP_FIXED_CODE`), CSP en enforce con HSTS.
 - **`TZ=UTC` en el proceso.** Los helpers de `src/lib/dates.ts` hacen el round-trip a través de la zona local del proceso; con `TZ=UTC` no hay DST que pueda desplazar el inicio de semana o de mes. La zona de *presentación* sigue siendo `APP_TIMEZONE` (ADR-013). El test `tests/unit/timezone.test.ts` fija el proceso en una zona con DST para que una regresión no pase desapercibida.
-- Contrato y schema: `prisma contract emit` en `prebuild`; en el servidor, `prisma db migrate` y `npm run db:constraints` si la base es nueva o cambió el contrato.
+- Contrato y schema: `prisma contract emit` en `prebuild`; en el servidor se ejecuta `npm run db:deploy`. Un deploy no usa `db init` ni `db update`.
 - Purga periódica: `npm run db:prune` desde un cron (la app también la lanza, como mucho una vez por hora y por instancia, al crear sesión).
 - Healthcheck HTTP: `/api/health`.
 - No hay Dockerfile de la app en este repo; Compose es solo Postgres.
@@ -136,3 +135,50 @@ Además del env, `AppConfig` en Postgres guarda `committee_credit_strategy` (edi
 ## Notificaciones
 
 Si hay `RESEND_API_KEY`, login y eventos de asistencia salen por Resend. Si hay `TEAMS_WEBHOOK_URL`, se POSTea `{ text }` al Incoming Webhook. Fallos de entrega no revierten el dominio (ADR-020).
+
+## Runbook de migraciones
+
+### Crear el baseline y el delta
+
+El directorio `migrations/snapshots/` conserva el snapshot anterior. Para un repositorio sin historial, el primer plan parte de `null`; el segundo parte del hash anterior y termina en el contrato emitido:
+
+```bash
+npm run contract:emit
+npx prisma migration plan --name baseline
+npx prisma migration plan --name cambio_descriptivo
+npx prisma migration check
+npx prisma migrate --show
+```
+
+En el primer comando, sin migraciones previas, el origen es `null`; en el siguiente, Prisma toma el último snapshot en disco. `--from <hash|ref|directorio>` permite fijar el origen al recuperar una rama. No se edita un snapshot. Si Prisma deja un placeholder por una conversión que requiere intención (por ejemplo `jsonb → text`), se completa la operación generada en `migration.ts`, se vuelve a emitir ese artefacto y se ejecutan `migration check` y `migrate --show` antes de entregar.
+
+### Desplegar
+
+```bash
+npm ci
+npm run contract:emit
+npx prisma migration check
+npx prisma migrate --show
+npm run db:deploy
+npm run db:seed # solo al crear un ambiente que necesite datos iniciales
+```
+
+El criterio mínimo es probarlo contra una base PostgreSQL realmente vacía. `db:deploy` aplica el baseline y todos los deltas en orden, crea los índices parciales idempotentes y termina con `prisma db verify`; cualquier paso fallido devuelve código distinto de cero.
+
+### Reset local
+
+Confirma primero que `DATABASE_URL` apunta a una base descartable y ejecuta:
+
+```bash
+npm run db:reset
+```
+
+Esto no representa un deploy y borra los datos existentes.
+
+### Recuperar una migración fallida
+
+1. Detén nuevas escrituras y conserva el log completo del comando.
+2. Ejecuta `npx prisma migrate --show` y revisa en PostgreSQL qué operaciones alcanzaron a aplicarse. No marques manualmente el contrato como vigente.
+3. Si la transacción se revirtió, corrige la migración en una rama nueva, vuelve a emitirla y valida el grafo antes de reintentar.
+4. Si hubo SQL no transaccional con efecto parcial, crea una migración compensatoria idempotente o restaura el backup del ambiente. No uses `db init` sobre datos que deban preservarse.
+5. Repite `npm run db:deploy` y exige `prisma db verify` verde antes de reabrir tráfico.

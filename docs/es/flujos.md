@@ -48,10 +48,11 @@ flowchart TD
   Token -->|no o t ok| Win{"OPEN y ahora en ventana?"}
   Win -->|no| Closed["Registro cerrado"]
   Win -->|sí| Click["Registrar asistencia"]
-  Click --> TX["insertAttendance + syncAttendanceCredit"]
-  TX --> Score["recomputeActivityScores"]
-  TX --> Badge["refreshBadges"]
-  TX --> Notify["email + Teams"]
+  Click --> TX["lock season/activity + insertAttendance + syncAttendanceCredit"]
+  TX --> Commit["commit"]
+  Commit --> Score["recomputeActivityScores"]
+  Commit --> Badge["refreshBadges"]
+  Commit --> Notify["email + Teams"]
 ```
 
 - URL pública: `/a/{publicId}`. El id interno no se expone en el QR (ADR-009).
@@ -62,14 +63,28 @@ flowchart TD
 - Duplicado: unique `(activityId, memberId)` → «Ya registraste tu asistencia.»
 - Temporada CLOSED o actividad no OPEN: error de dominio.
 
-Admin puede añadir asistencia a mano o masiva (`bulkAwardActivity`) sin ventana de registro.
+Admin puede añadir asistencia a mano o masiva (`bulkAwardActivity`) sin ventana de registro, pero solo cuando la actividad está OPEN o CLOSED.
+
+## Ciclo y cancelación de actividad
+
+El detalle admin ofrece comandos contextuales, no un selector libre: DRAFT→OPEN, OPEN→CLOSED y CLOSED→PROCESSED. No hay reapertura. El procesamiento falla mientras quede una asistencia PENDING.
+
+Cancelar exige un motivo. Bajo un único bloqueo/transacción se cambia la actividad, se cancelan asistencias PENDING/APPROVED, se crea una REVERSAL por cada crédito vivo y se audita la actividad y cada asistencia. REJECTED/CANCELLED se conservan. Repetir el comando sobre una actividad ya cancelada no duplica reversión ni auditoría.
+
+La edición se reduce con el avance: todos los campos en DRAFT; metadatos y fechas en OPEN; solo nombre/descripción en CLOSED; solo lectura en PROCESSED/CANCELLED.
+
+## Aprobación administrativa
+
+`/admin/attendance` admite filtros URL `q`, `committee` y `activity`; `q` busca nombre o correo institucional. El correo aparece en estas superficies admin, nunca en rankings ni roster de líder.
+
+En la bandeja global y el detalle de actividad se pueden seleccionar filas visibles, comprobar el contador anunciado por lector de pantalla y aprobar/rechazar únicamente la selección. “Aprobar todos” y “Rechazar todos” son acciones separadas con confirmación. El servidor vuelve a validar permiso, temporada, actividad, estado y cada asistencia; un id inválido revierte el lote completo.
 
 ## Otorgar y revertir puntos
 
 1. **Por asistencia:** automático al pasar a APPROVED (`individualPoints`).
 2. **Manual:** `/admin/points` → `assignManualPoints`. Motivo obligatorio. Negativo → tipo `PENALTY`.
 3. **Masiva por actividad:** checkboxes de integrantes → asistencias APPROVED + crédito de la actividad.
-4. **Reversión:** botón en el ledger → fila `REVERSAL` (`-puntos`). No borra la original. No se revierte una reversión.
+4. **Reversión manual:** botón en el ledger para ajustes manuales/bonus/penalizaciones → fila `REVERSAL` (`-puntos`). No borra la original, no permite una segunda reversión y no opera en temporada cerrada. Los créditos `ACTIVITY` se corrigen rechazando o cancelando la asistencia para mantener ledger y estado sincronizados.
 5. Tras REJECTED/CANCELLED de una asistencia ya acreditada: se revierte el `ACTIVITY`. **No** se puede volver a APPROVED; hace falta ajuste manual.
 
 ## Rankings
@@ -88,11 +103,11 @@ Admin pone la temporada en `CLOSED` → snapshot JSON en la misma transacción �
 
 ### Integrantes (CSV/XLSX)
 
-`/admin/imports` → vista previa (`adminPreviewImportAction`) → job PREVIEWED → confirmar (`adminCommitImportAction`). Cero errores para commit. Upsert por correo; suma comités.
+`/admin/imports` → vista previa (`adminPreviewImportAction`) → job PREVIEWED → confirmar (`adminCommitImportAction`). Solo CSV/XLSX, máximo 10 MB y 10.000 filas. Cero errores para commit. Upsert por correo; suma comités activos y vuelve a validar el tope al confirmar.
 
 ### Forms histórico
 
-Misma UI con columnas correo + actividad. O `POST /api/import/forms` con JSON y `Authorization: Bearer IMPORT_SECRET` o sesión admin. Asistencias APPROVED, duplicados omitidos.
+Misma UI con columnas correo + actividad. O `POST /api/import/forms` con JSON y `Authorization: Bearer IMPORT_SECRET` o sesión admin. La actividad se resuelve por id/publicId exacto o nombre no ambiguo y debe pertenecer a una temporada abierta. Asistencias APPROVED, duplicados omitidos.
 
 ## Exportaciones
 
@@ -100,7 +115,7 @@ Enlaces CSV/XLSX en admin (integrantes, asistencias, puntos, rankings, actividad
 
 ## Temporada
 
-`/admin/seasons`: crear UPCOMING o ACTIVE (falla si ya hay ACTIVE). Cambiar a CLOSED congela Hall of Fame y refresca badges. Las actividades nuevas no se pueden crear en temporada cerrada. El ledger de esa temporada permanece.
+`/admin/seasons`: crear UPCOMING o ACTIVE (falla si ya hay ACTIVE); nombre y rango de fechas son obligatorios y coherentes. Cambiar a CLOSED congela Hall of Fame y refresca badges. Una temporada cerrada no se reabre ni admite cambios de actividades, asistencias, importaciones o ledger. El ledger histórico permanece.
 
 ## Propuesta de líder
 

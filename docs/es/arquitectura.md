@@ -58,7 +58,7 @@ flowchart TB
 | --- | --- | --- | --- |
 | Páginas RSC | `src/app/**` | Leer vía módulos de dominio (`member-reads`, `leader-reads`, `analytics`) y renderizar | Consultar la base directo (regla de `CONTEXT.md`: vistas de integrante/líder no tocan la base) |
 | Componentes client | `src/components/**` | Enviar `FormData` a server actions, transiciones UI | Autorizar o calcular puntos |
-| Proxy (Node) | `src/proxy.ts` | Redirigir a `/login` si no hay cookie `gh_session`; emitir la CSP con nonce por request | Validar sesión, roles o estado del integrante (ADR-010) |
+| Proxy (Node) | `src/proxy.ts` | Redirigir a `/login` si una ruta protegida no tiene cookie `gh_session`; conservar pathname y query; emitir la CSP con nonce por request | Validar sesión, roles o estado del integrante (ADR-010) |
 | Server actions | `src/server/actions/**` | Parsear FormData, `requireAdmin` / `requireActor`, llamar dominio, `revalidatePath` | Reimplementar reglas |
 | Auth | `src/server/auth/**` | OTP, magic link, Entra, cookie, `Actor` | Crear integrantes al login |
 | Dominio | `src/server/domain/**` | Invariantes, ledger, scoring, auditoría | Conocer cookies o Tailwind |
@@ -104,11 +104,11 @@ sequenceDiagram
 
 ## Proxy vs autorización
 
-`src/proxy.ts` (convención de Next 16; antes `middleware.ts`, deprecada) solo mira si existe la cookie `SESSION_COOKIE` (`gh_session` en `src/lib/constants.ts`) y solo redirige en `/app`, `/admin` y `/login`. Su matcher es amplio —todo menos la salida estática de Next y los archivos de imagen— porque además emite la CSP con nonce en cada documento (ADR-022). Corre en runtime Node, no Edge.
+`src/proxy.ts` (convención de Next 16; antes `middleware.ts`, deprecada) solo mira si existe la cookie `SESSION_COOKIE` (`gh_session` en `src/lib/constants.ts`) para redirigir accesos sin cookie a `/app` y `/admin`. No redirige `/login` por la mera presencia de una cookie: la página valida la sesión, lo que evita un bucle con cookies vencidas o inválidas. Su matcher es amplio —todo menos la salida estática de Next y los archivos de imagen— porque además emite la CSP con nonce en cada documento (ADR-022). Corre en runtime Node, no Edge.
 
-- `/app` y `/admin` sin cookie → `/login?next=<pathname>`.
-- `/login` con cookie y sin `next` → `/app` (un admin que entre a `/login` no es redirigido a `/admin` aquí; eso lo hace el action de login).
-- `/a/[publicId]`, `/hall-of-fame`, `/api/*` **no** pasan por este matcher. La página pública de actividad redirige ella misma a login; las API validan admin o bearer.
+- `/app` y `/admin` sin cookie → `/login?next=<pathname+query>`.
+- `/login` consulta `getCurrentActor`: sesión válida → destino seguro o área por rol; cookie inválida → formulario normal.
+- `/a/[publicId]`, `/hall-of-fame`, `/api/*` no reciben el redirect de autenticación del proxy. La página pública de actividad redirige ella misma a login; las API validan admin o bearer.
 
 La autorización real vive en `src/server/domain/authorization.ts` (`requireActor`, `requireAdmin`, `requireCommitteeLeader`) y en `src/server/auth/guard.ts` para páginas.
 
@@ -141,6 +141,7 @@ No existen ya las rutas `/api/members`, `/api/events`, `/api/committees` del pro
 ## Dónde vive la lógica vs la UI
 
 - **Puntos, asistencia, score de comité, badges, temporada:** solo `src/server/domain/*`.
+- **Mutación administrativa + auditoría:** una sola `db.transaction`; `writeAuditLog` siempre recibe `tx`. Los locks de temporada/actividad y la revalidación viven en dominio.
 - **Quién puede mutar:** `authorization.ts` + `requireAdmin` al inicio de cada función de dominio sensible (no basta el layout).
 - **Lecturas de integrante:** `member-reads.ts` (home, perfil, listado de actividades). Las páginas `/app` no importan el cliente de datos.
 - **Lecturas de líder:** `leader-reads.ts`. El roster **omite email** (ADR-014).

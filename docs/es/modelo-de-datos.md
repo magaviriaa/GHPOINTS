@@ -6,7 +6,7 @@ En TypeScript, `timestamptz` llega como string ISO y las fechas de calendario (`
 
 Uniques parciales que el contrato no expresa (predicados `WHERE`) se aplican con `npm run db:constraints` (`src/prisma/apply-constraints.ts`).
 
-Base vacía: `prisma db init`. Cambios de contrato en local: `prisma db update`. Producción: `prisma db migrate` tras un `migration plan`. El seed (`prisma/seed.ts`) borra tablas en orden de FKs, crea config, 17 comités, temporada `2026-2` ACTIVE y `2026-1` CLOSED con Hall of Fame sintético, admin `gh.general@<dominio>`, líder GEMIS, ~50 integrantes, actividades y badges. Dominio de correo: primer valor de `INSTITUTIONAL_EMAIL_DOMAINS`.
+Base vacía desplegable: `npm run db:deploy` aplica el baseline y los deltas, crea constraints parciales y verifica el contrato. `prisma db init` queda reservado para `db:reset` local destructivo; cambios de contrato en local usan `npm run db:migrate`. El seed (`prisma/seed.ts`) borra tablas en orden de FKs, crea config, 17 comités, temporada `2026-2` ACTIVE y `2026-1` CLOSED con Hall of Fame sintético, admin `gh.general@<dominio>`, líder GEMIS, ~50 integrantes, actividades y badges. Dominio de correo: primer valor de `INSTITUTIONAL_EMAIL_DOMAINS`.
 
 ## Diagrama de entidades
 
@@ -132,6 +132,7 @@ Evento que puede otorgar GH Points.
 | `registrationStart` / `registrationEnd` | Ventana; se compara con `new Date()` del servidor. |
 | `approvalMode` | AUTO o MANUAL. |
 | `status` | Ciclo de vida. |
+| `cancelledAt` / `cancelReason` | Instante y motivo obligatorios cuando se cancela; el reintento no los reemplaza. |
 | `committeeId` | Opcional; las propuestas de líder lo llenan. |
 | `needsApproval` | `true` mientras está en cola (`DRAFT` propuesto). |
 | `requireAttendanceToken` | QR dinámico. |
@@ -210,7 +211,7 @@ Un snapshot por temporada cerrada. `top3Active` / `top3New` / `top3Committees` /
 
 ### ImportJob
 
-Trabajo de importación. `type`: `MEMBERS` o `FORMS`. `status`: `PREVIEWED`, `CONSUMED`, `COMMITTED`. La vista previa vive en `summary` JSON; al confirmar se marca consumida para no reutilizarla.
+Trabajo de importación. `type`: `MEMBERS` o `FORMS`. `status`: `PREVIEWED`, `CONSUMED`, `COMMITTED`. La vista previa vive en `summary` JSON; el commit cambia PREVIEWED→COMMITTED dentro de la misma transacción que las filas y la auditoría, por lo que no se puede reutilizar.
 
 ## FKs y borrado
 

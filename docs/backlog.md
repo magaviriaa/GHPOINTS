@@ -4,7 +4,9 @@ Funcionalidades deliberadamente fuera del núcleo o pendientes de operación ext
 
 Documentación del código actual: [docs/es/README.md](es/README.md).
 
-## Hecho en esta entrega (P0–P3)
+## Implementado en P0–P3; cierre condicionado a gates
+
+Estos elementos están implementados, pero P0–P3 solo se consideran cerrados en una revisión cuyo CI demuestre: despliegue desde PostgreSQL vacío, `prisma db verify`, lint, typecheck, unitarias, integración, build, E2E Chromium/WebKit y axe sin violaciones serias/críticas. El smoke manual de light/dark, teclado, reduced motion y QR completa el gate operativo.
 
 - Roles ADMIN / COMMITTEE_LEADER / MEMBER en UI de integrantes.
 - Magic link paralelo al OTP.
@@ -67,4 +69,4 @@ Otras fórmulas futuras (brief §28), no hay editor matemático:
 - `loading.tsx` en `/app` y `/admin` está bloqueado por un error de hidratación (ADR-024). **Repro:** crear `src/app/admin/loading.tsx` que devuelva `<p>Cargando…</p>`, abrir `/admin/points` con la consola abierta → «Hydration failed», con el diff `+ <main className="min-w-0 flex-1 p-4 md:p-8">` / `- <Suspense>` apuntando a `admin/layout.tsx:12`. Reintentar al subir de versión.
 - El coalescing de efectos es por instancia de proceso; con varias instancias cada una hace su recompute (idempotente, pero no compartido).
 - Totales de ranking se agregan en query; no hay materialized view.
-- E2E cubre login, registro, rankings y creación admin; no toda la matriz de roles.
+- El E2E cubre MEMBER, COMMITTEE_LEADER y ADMIN, pero no Entra, importaciones, QR dinámico ni Hall of Fame por navegador.

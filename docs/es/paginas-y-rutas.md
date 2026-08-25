@@ -1,6 +1,6 @@
 # Páginas y rutas
 
-Next.js App Router. Autorización de página: layout `/app` exige sesión (`requirePageActor`); layout `/admin` exige ADMIN (`requirePageAdmin`). Proxy (`src/proxy.ts`): cookie presente en `/app`, `/admin`, `/login` (ver [arquitectura.md](./arquitectura.md)).
+Next.js App Router. Autorización de página: layout `/app` exige sesión (`requirePageActor`); layout `/admin` exige ADMIN (`requirePageAdmin`). Proxy (`src/proxy.ts`): exige presencia de cookie en `/app` y `/admin`; la sesión real se valida en servidor (ver [arquitectura.md](./arquitectura.md)).
 
 Las mutaciones van a server actions salvo las API listadas al final.
 
@@ -9,7 +9,7 @@ Las mutaciones van a server actions salvo las API listadas al final.
 | Ruta | Archivo | Qué hace | Auth |
 | --- | --- | --- | --- |
 | `/` | `src/app/page.tsx` | Landing. CTA a `/login` o `/app` si hay actor. | Opcional (`getCurrentActor`) |
-| `/login` | `src/app/login/page.tsx` | `LoginForm`: OTP y, si aplica, Microsoft. Query `next`, `error`. | Si hay cookie y no hay `next`, el proxy manda a `/app` |
+| `/login` | `src/app/login/page.tsx` | `LoginForm`: OTP y, si aplica, Microsoft. Query `next`, `error`. | La página valida el actor; una cookie inválida no provoca un loop. `next` solo admite destinos internos fuera de auth |
 | `/login/magic` | `src/app/login/magic/page.tsx` | Consume token. Actions: `consumeMagicLinkAction`. | Token en query |
 | `/a/[publicId]` | `src/app/a/[publicId]/page.tsx` | Registro de asistencia. `getPublicActivityRegistration`, `RegisterAttendanceButton` → `registerAttendanceAction`. Query `t` = token dinámico. | Redirige a login si no hay actor. El proxy no lo redirige; la guarda está en la página |
 | `/hall-of-fame` | `src/app/hall-of-fame/page.tsx` | Reexporta la página del salón. **Sin** layout `/app`. | Pública (nombres, sin email) |
@@ -41,8 +41,8 @@ Sidebar: `src/components/admin/sidebar.tsx`. Agrupado en Operación / Datos / Si
 | `/admin/members/[id]` | `admin/members/[id]/page.tsx` | `getMemberDetail`, puntos de temporada | `adminUpdateMemberAction` (datos, comités, roles) | ADMIN |
 | `/admin/committees` | `admin/committees/page.tsx` | `listCommittees` | create/update committee | ADMIN |
 | `/admin/activities` | `admin/activities/page.tsx` | `listActivities`, `listProposedActivities` | create, publish/reject proposal | ADMIN |
-| `/admin/activities/[id]` | `admin/activities/[id]/page.tsx` | actividad, asistencias, scores, QR | update, rotate QR, token dinámico, aprobar/rechazar/anular/bulk, add attendance | ADMIN |
-| `/admin/attendance` | `admin/attendance/page.tsx` | `listPendingAttendances` | approve, reject, bulk reject | ADMIN |
+| `/admin/activities/[id]` | `admin/activities/[id]/page.tsx` | actividad, asistencias, scores, QR | edición por estado, transición contextual, cancelación con motivo/reversión, rotate QR, selección o todos, add attendance | ADMIN |
+| `/admin/attendance` | `admin/attendance/page.tsx` | pendientes filtrados por `q`, `committee`, `activity` | aprobar/rechazar selección o todos con confirmación | ADMIN |
 | `/admin/points` | `admin/points/page.tsx` | miembros, ledger, actividades | assign, reverse, bulk award | ADMIN |
 | `/admin/rankings` | `admin/rankings/page.tsx` | mismos rankings de temporada | export links | ADMIN |
 | `/admin/seasons` | `admin/seasons/page.tsx` | `listSeasons` | create, update status | ADMIN |
@@ -82,7 +82,7 @@ No hay `/admin/login`: el login unificado es `/login`.
 
 ### `src/server/actions/admin.ts`
 
-`adminCreateMemberAction`, `adminUpdateMemberAction`, `adminCreateCommitteeAction`, `adminUpdateCommitteeAction`, `adminCreateSeasonAction`, `adminUpdateSeasonStatusAction`, `adminCreateActivityAction`, `adminUpdateActivityAction`, `adminRotateQrAction`, `adminApproveAttendanceAction`, `adminBulkApproveAction`, `adminRejectAttendanceAction`, `adminBulkRejectAction`, `adminCancelAttendanceAction`, `adminAddAttendanceAction`, `adminAssignPointsAction`, `adminReversePointsAction`, `adminBulkAwardAction`, `adminSaveConfigAction`, `adminPreviewImportAction`, `adminCommitImportAction`, `adminPreviewFormsImportAction`, `adminCommitFormsImportAction`, `adminPublishProposalAction`, `adminRejectProposalAction`, `adminRotateAttendanceTokenAction` (devuelve token), `adminDisableAttendanceTokenAction`.
+`adminCreateMemberAction`, `adminUpdateMemberAction`, `adminCreateCommitteeAction`, `adminUpdateCommitteeAction`, `adminCreateSeasonAction`, `adminUpdateSeasonStatusAction`, `adminCreateActivityAction`, `adminUpdateActivityAction`, `adminTransitionActivityAction`, `adminCancelActivityAction`, `adminRotateQrAction`, `adminApproveAttendanceAction`, `adminBulkApproveAction`, `adminRejectAttendanceAction`, `adminBulkRejectAction`, `adminCancelAttendanceAction`, `adminAddAttendanceAction`, `adminAssignPointsAction`, `adminReversePointsAction`, `adminBulkAwardAction`, `adminSaveConfigAction`, `adminPreviewImportAction`, `adminCommitImportAction`, `adminPreviewFormsImportAction`, `adminCommitFormsImportAction`, `adminPublishProposalAction`, `adminRejectProposalAction`, `adminRotateAttendanceTokenAction` (devuelve token), `adminDisableAttendanceTokenAction`.
 
 ## Componentes de producto (no shadcn)
 

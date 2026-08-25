@@ -70,7 +70,7 @@ Rotar `publicId` invalida QR impresos y deja el id anterior en `ActivityPublicId
 
 ## ADR-010 — Autorización en servidor, no en middleware Edge
 
-**Decisión:** el middleware solo comprueba presencia de cookie (UX de redirect). `AuthorizationService` + `getCurrentActor()` validan sesión, estado del integrante y roles en runtime Node.
+**Decisión:** el proxy solo comprueba ausencia de cookie en rutas protegidas (UX de redirect). No usa una cookie presente para sacar al usuario de `/login`, porque puede estar vencida o ser inválida. `AuthorizationService` + `getCurrentActor()` validan sesión, estado del integrante y roles en runtime Node.
 
 **Por qué:** la cookie no es prueba de autorización.
 
@@ -176,3 +176,18 @@ Consecuencia operativa: una aprobación masiva de N integrantes envía N correos
 
 **Login:** vigente y honorario. Ranking, badges y denominador de comité: solo vigente. Licencia y retiro destruyen sesiones.
 
+## ADR-026 — Ciclo de actividad progresivo y cancelación compensatoria
+
+**Decisión:** el estado de `Activity` no se edita como un campo genérico. Solo existen los comandos DRAFT→OPEN, OPEN→CLOSED, CLOSED→PROCESSED y cancelación desde cualquier estado no cancelado. No hay reaperturas. Procesar exige cero asistencias PENDING.
+
+**Cancelación:** exige motivo y bloquea temporada/actividad. En una transacción cambia la actividad, cancela asistencias PENDING/APPROVED, crea una REVERSAL idempotente por cada crédito vivo y audita cada entidad. El ledger original no se borra. Repetir una cancelación confirmada es un no-op incluso si después cerró la temporada.
+
+**Por qué:** evita créditos huérfanos y carreras entre el último registro y una decisión administrativa. Los campos se congelan de manera progresiva porque puntos y aprobación ya materializados no se pueden reinterpretar sin una compensación explícita.
+
+## ADR-027 — Migraciones reproducibles y auditoría dentro del commit
+
+**Decisión de despliegue:** CI y producción parten del historial en `migrations/app` y ejecutan `prisma migrate`, índices parciales idempotentes y `prisma db verify`. `prisma db init` solo existe para resets locales descartables. El baseline `null→snapshot` y cada delta conservan sus snapshots para que el grafo sea verificable offline.
+
+**Decisión transaccional:** `writeAuditLog(tx, input)` requiere el mismo cliente transaccional que la mutación. Lotes auditan una entrada por entidad y se rechazan completos si una fila dejó de ser válida. Temporadas y actividades se serializan con bloqueo antes de releer y escribir. Hall of Fame y cierre de temporada comparten lock, snapshot y commit.
+
+**Consecuencia:** notificaciones, badges, scores y revalidaciones de caché ocurren después del commit; su fallo puede dejar trabajo derivado pendiente, pero nunca revierte ni falsea la mutación principal.
